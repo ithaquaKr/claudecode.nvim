@@ -34,6 +34,9 @@ M.defaults = {
     { name = "Claude Haiku 4.5 (Latest)", value = "haiku" },
   },
   terminal = nil, -- Will be lazy-loaded to avoid circular dependency
+  session_management = {
+    enabled = true,
+  },
 }
 
 ---Validates the provided configuration table.
@@ -161,6 +164,17 @@ function M.validate(config)
   for key, value in pairs(config.env) do
     assert(type(key) == "string", "env keys must be strings")
     assert(type(value) == "string", "env values must be strings")
+  end
+
+  -- Validate session_management
+  if config.session_management ~= nil then
+    assert(type(config.session_management) == "table", "session_management must be a table")
+    if config.session_management.enabled ~= nil then
+      assert(
+        type(config.session_management.enabled) == "boolean",
+        "session_management.enabled must be a boolean"
+      )
+    end
   end
 
   -- Validate models
