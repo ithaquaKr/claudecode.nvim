@@ -568,7 +568,7 @@ end)
 describe("session: terminal integration", function()
   local terminal
   local session_resolve_args_calls
-  local session_resolve_args_callback_args -- what resolve_args will pass to callback
+  local mock_resolve_result -- what resolve_args will pass to callback
 
   before_each(function()
     package.loaded["claudecode.terminal"] = nil
@@ -576,7 +576,7 @@ describe("session: terminal integration", function()
     package.loaded["claudecode.server.init"] = nil
 
     session_resolve_args_calls = {}
-    session_resolve_args_callback_args = nil -- nil = start fresh by default
+    mock_resolve_result = nil -- nil = start fresh by default
 
     -- Mock server module (required by terminal.lua at module load)
     package.loaded["claudecode.server.init"] = { state = { port = nil } }
@@ -586,7 +586,7 @@ describe("session: terminal integration", function()
       is_setup = true,
       resolve_args = function(cwd, cb)
         table.insert(session_resolve_args_calls, cwd)
-        cb(session_resolve_args_callback_args)
+        cb(mock_resolve_result)
       end,
     }
     package.loaded["claudecode.session"] = mock_session
@@ -668,7 +668,7 @@ describe("session: terminal integration", function()
   end)
 
   it("simple_toggle does not open terminal when session resolve returns false (cancel)", function()
-    session_resolve_args_callback_args = false -- user cancelled
+    mock_resolve_result = false -- user cancelled
     local provider_calls = {}
     local mock_provider = {
       get_active_bufnr = function() return nil end,
@@ -684,6 +684,28 @@ describe("session: terminal integration", function()
     terminal.setup({ provider = mock_provider }, nil, nil)
 
     terminal.simple_toggle({}, nil)
+
+    assert.are.equal(1, #session_resolve_args_calls)
+    assert.are.equal(0, #provider_calls) -- terminal NOT opened
+  end)
+
+  it("focus_toggle does not open terminal when session resolve returns false (cancel)", function()
+    mock_resolve_result = false -- user cancelled
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return nil end,
+      simple_toggle = function() end,
+      focus_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.focus_toggle({}, nil)
 
     assert.are.equal(1, #session_resolve_args_calls)
     assert.are.equal(0, #provider_calls) -- terminal NOT opened
