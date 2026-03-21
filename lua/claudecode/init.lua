@@ -362,6 +362,15 @@ function M.setup(opts)
     logger.error("init", "Failed to load claudecode.terminal module for setup.")
   end
 
+  local session_setup_ok, session_module = pcall(require, "claudecode.session")
+  if session_setup_ok then
+    if type(session_module.setup) == "function" then
+      session_module.setup(M.state.config.session_management)
+    end
+  else
+    logger.warn("init", "Failed to load claudecode.session module for setup.")
+  end
+
   local diff = require("claudecode.diff")
   diff.setup(M.state.config)
 
@@ -516,6 +525,12 @@ function M.stop()
 
   -- Clear any queued @ mentions when server stops
   clear_mention_queue()
+
+  -- Reset session module in-memory state
+  local session_ok, session_module = pcall(require, "claudecode.session")
+  if session_ok and type(session_module.reset) == "function" then
+    session_module.reset()
+  end
 
   logger.info("init", "Claude Code integration stopped")
 
