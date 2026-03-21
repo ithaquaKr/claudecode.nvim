@@ -364,10 +364,12 @@ function M.setup(opts)
 
   local session_setup_ok, session_module = pcall(require, "claudecode.session")
   if session_setup_ok then
+    -- Guard in case tests or user replace the module with a minimal stub without `setup`.
     if type(session_module.setup) == "function" then
       session_module.setup(M.state.config.session_management)
     end
   else
+    -- Session module is optional; warn rather than error since core features still work
     logger.warn("init", "Failed to load claudecode.session module for setup.")
   end
 
@@ -528,7 +530,7 @@ function M.stop()
 
   -- Reset session module in-memory state
   local session_ok, session_module = pcall(require, "claudecode.session")
-  if session_ok and type(session_module.reset) == "function" then
+  if session_ok and type(session_module.reset) == "function" then -- Guard in case minimal stub
     session_module.reset()
   end
 
