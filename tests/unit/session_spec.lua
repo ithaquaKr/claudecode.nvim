@@ -564,3 +564,149 @@ describe("session: public API", function()
     assert.is_nil(second_result)
   end)
 end)
+
+describe("session: terminal integration", function()
+  local terminal
+  local session_resolve_args_calls
+  local session_resolve_args_callback_args -- what resolve_args will pass to callback
+
+  before_each(function()
+    package.loaded["claudecode.terminal"] = nil
+    package.loaded["claudecode.session"] = nil
+    package.loaded["claudecode.server.init"] = nil
+
+    session_resolve_args_calls = {}
+    session_resolve_args_callback_args = nil -- nil = start fresh by default
+
+    -- Mock server module (required by terminal.lua at module load)
+    package.loaded["claudecode.server.init"] = { state = { port = nil } }
+
+    -- Mock session module
+    local mock_session = {
+      is_setup = true,
+      resolve_args = function(cwd, cb)
+        table.insert(session_resolve_args_calls, cwd)
+        cb(session_resolve_args_callback_args)
+      end,
+    }
+    package.loaded["claudecode.session"] = mock_session
+
+    -- Mock vim functions
+    _G.vim.fn = _G.vim.fn or {}
+    _G.vim.fn.getcwd = spy.new(function() return "/fake/project" end)
+    _G.vim.api = _G.vim.api or {}
+    _G.vim.api.nvim_buf_is_valid = spy.new(function(bufnr) return false end) -- fresh open
+
+    terminal = require("claudecode.terminal")
+    terminal.setup(nil, nil, nil)
+  end)
+
+  it("simple_toggle calls session.resolve_args on fresh open with no cmd_args", function()
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return nil end, -- fresh open
+      simple_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      focus_toggle = function() end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.simple_toggle({}, nil)
+
+    assert.are.equal(1, #session_resolve_args_calls)
+    assert.are.equal(1, #provider_calls)
+    assert.are.equal("claude", provider_calls[1].cmd)
+  end)
+
+  it("simple_toggle bypasses session prompt when cmd_args provided", function()
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return nil end,
+      simple_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      focus_toggle = function() end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.simple_toggle({}, "--resume abc-123")
+
+    assert.are.equal(0, #session_resolve_args_calls) -- no session prompt
+    assert.are.equal(1, #provider_calls)
+    assert_contains(provider_calls[1].cmd, "--resume abc-123")
+  end)
+
+  it("simple_toggle bypasses session prompt when terminal already exists", function()
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return 42 end, -- existing buffer
+      simple_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      focus_toggle = function() end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    _G.vim.api.nvim_buf_is_valid = spy.new(function(bufnr) return true end) -- valid = not fresh
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.simple_toggle({}, nil) -- trigger the toggle
+
+    assert.are.equal(0, #session_resolve_args_calls) -- session prompt NOT shown
+    assert.are.equal(1, #provider_calls) -- terminal toggle did fire
+  end)
+
+  it("simple_toggle does not open terminal when session resolve returns false (cancel)", function()
+    session_resolve_args_callback_args = false -- user cancelled
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return nil end,
+      simple_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      focus_toggle = function() end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.simple_toggle({}, nil)
+
+    assert.are.equal(1, #session_resolve_args_calls)
+    assert.are.equal(0, #provider_calls) -- terminal NOT opened
+  end)
+
+  it("focus_toggle also calls session.resolve_args on fresh open", function()
+    local provider_calls = {}
+    local mock_provider = {
+      get_active_bufnr = function() return nil end,
+      simple_toggle = function() end,
+      focus_toggle = function(cmd, env, cfg)
+        table.insert(provider_calls, { cmd = cmd })
+      end,
+      open = function() end,
+      close = function() end,
+      setup = function() end,
+      is_available = function() return true end,
+    }
+    terminal.setup({ provider = mock_provider }, nil, nil)
+
+    terminal.focus_toggle({}, nil)
+
+    assert.are.equal(1, #session_resolve_args_calls)
+    assert.are.equal(1, #provider_calls)
+  end)
+end)

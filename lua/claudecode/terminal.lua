@@ -509,23 +509,64 @@ function M.close()
 end
 
 ---Simple toggle: always show/hide the Claude terminal regardless of focus.
----@param opts_override table? Overrides for terminal appearance (split_side, split_width_percentage).
----@param cmd_args string? Arguments to append to the claude command.
+---On fresh open with no explicit args, prompts for session selection.
+---@param opts_override table? Overrides for terminal appearance.
+---@param cmd_args string? Arguments to append to the claude command. Bypasses session prompt if set.
 function M.simple_toggle(opts_override, cmd_args)
+  local provider = get_provider()
+  local bufnr = provider.get_active_bufnr()
+  local is_fresh = not (bufnr and vim.api.nvim_buf_is_valid(bufnr))
+
+  if is_fresh and (not cmd_args or cmd_args == "") then
+    local session_ok, session_module = pcall(require, "claudecode.session")
+    if session_ok and session_module.is_setup then
+      -- Capture config before async gap (vim.ui.select is async)
+      local effective_config = build_config(opts_override)
+      local cwd = vim.fn.getcwd()
+      session_module.resolve_args(cwd, function(resolved_args)
+        if resolved_args == false then
+          return -- user cancelled; do not open terminal
+        end
+        local cmd_string, claude_env_table = get_claude_command_and_env(resolved_args)
+        provider.simple_toggle(cmd_string, claude_env_table, effective_config)
+      end)
+      return
+    end
+  end
+
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
-
-  get_provider().simple_toggle(cmd_string, claude_env_table, effective_config)
+  provider.simple_toggle(cmd_string, claude_env_table, effective_config)
 end
 
 ---Smart focus toggle: switches to terminal if not focused, hides if currently focused.
----@param opts_override table (optional) Overrides for terminal appearance (split_side, split_width_percentage).
----@param cmd_args string|nil (optional) Arguments to append to the claude command.
+---On fresh open with no explicit args, prompts for session selection.
+---@param opts_override table? Overrides for terminal appearance.
+---@param cmd_args string|nil? Arguments to append to the claude command. Bypasses session prompt if set.
 function M.focus_toggle(opts_override, cmd_args)
+  local provider = get_provider()
+  local bufnr = provider.get_active_bufnr()
+  local is_fresh = not (bufnr and vim.api.nvim_buf_is_valid(bufnr))
+
+  if is_fresh and (not cmd_args or cmd_args == "") then
+    local session_ok, session_module = pcall(require, "claudecode.session")
+    if session_ok and session_module.is_setup then
+      local effective_config = build_config(opts_override)
+      local cwd = vim.fn.getcwd()
+      session_module.resolve_args(cwd, function(resolved_args)
+        if resolved_args == false then
+          return
+        end
+        local cmd_string, claude_env_table = get_claude_command_and_env(resolved_args)
+        provider.focus_toggle(cmd_string, claude_env_table, effective_config)
+      end)
+      return
+    end
+  end
+
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
-
-  get_provider().focus_toggle(cmd_string, claude_env_table, effective_config)
+  provider.focus_toggle(cmd_string, claude_env_table, effective_config)
 end
 
 ---Toggle open terminal without focus if not already visible, otherwise do nothing.
