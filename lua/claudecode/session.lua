@@ -184,7 +184,7 @@ local function write_prefs(prefs)
   end
   vim.loop.fs_write(fd, content, 0)
   vim.loop.fs_close(fd)
-  return vim.loop.fs_rename(tmp_path, path) ~= false
+  return vim.loop.fs_rename(tmp_path, path) == true
 end
 
 ---Get the last saved session ID for the given cwd.

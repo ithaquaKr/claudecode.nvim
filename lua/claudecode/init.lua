@@ -267,7 +267,7 @@ function M._ensure_terminal_visible_if_connected()
   local is_visible = bufinfo and #bufinfo.windows > 0
 
   if not is_visible then
-    terminal.simple_toggle()
+    terminal.ensure_visible()
   end
 
   return true
