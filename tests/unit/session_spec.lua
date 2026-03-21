@@ -364,3 +364,203 @@ describe("session: preferences file", function()
     assert.spy(_G.vim.loop.fs_rename).was_called()
   end)
 end)
+
+describe("session: public API", function()
+  local session
+  local ui_select_calls = {}
+  local ui_select_choice = nil -- what vim.ui.select will "pick"
+
+  before_each(function()
+    package.loaded["claudecode.session"] = nil
+    ui_select_calls = {}
+    ui_select_choice = nil
+    _G.vim.fn = _G.vim.fn or {}
+    _G.vim.fn.resolve = spy.new(function(p) return p end)
+    _G.vim.fn.fnamemodify = spy.new(function(p, mod)
+      if mod == ":p" then return p:sub(-1) == "/" and p or p .. "/" end
+      if mod == ":h" then return p:match("(.+)/[^/]+$") or p end
+      return p
+    end)
+    _G.vim.fn.stdpath = spy.new(function() return "/tmp/nvim-test-data" end)
+    _G.vim.fn.expand = spy.new(function(p) return p end)
+    _G.vim.fn.mkdir = spy.new(function() return 1 end)
+    _G.vim.loop = {
+      fs_opendir = spy.new(function() return nil end),
+      fs_stat = spy.new(function() return nil end),
+      fs_open = spy.new(function() return 42 end),
+      fs_write = spy.new(function() return true end),
+      fs_close = spy.new(function() end),
+      fs_rename = spy.new(function() return true end),
+    }
+    _G.vim.json = {}
+    _G.vim.json.encode = function(t) return _G.json_encode(t) end
+    _G.vim.json.decode = function(s) return _G.json_decode(s) end
+    _G.vim.ui = _G.vim.ui or {}
+    _G.vim.ui.select = spy.new(function(items, opts, cb)
+      table.insert(ui_select_calls, { items = items, opts = opts })
+      if ui_select_choice ~= nil then
+        -- Find index of choice
+        for i, item in ipairs(items) do
+          if item == ui_select_choice then
+            cb(item, i)
+            return
+          end
+        end
+        cb(nil, nil) -- not found = cancel
+      else
+        cb(nil, nil) -- nil choice = cancel
+      end
+    end)
+    session = require("claudecode.session")
+    session.setup({ enabled = true })
+  end)
+
+  it("setup sets is_setup flag", function()
+    expect(session.is_setup).to_be_true()
+  end)
+
+  it("reset clears in-memory skip flags", function()
+    -- First resolve to set the skip flag
+    local orig_open = io.open
+    io.open = function() return nil end
+    local callback_result
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    io.open = orig_open
+    -- skip flag now set (start fresh path)
+    -- reset
+    session.reset()
+    -- After reset, is_setup is false
+    expect(session.is_setup).to_be_false()
+  end)
+
+  it("resolve_args calls back with nil immediately when disabled", function()
+    session.setup({ enabled = false })
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    assert.is_nil(callback_result)
+  end)
+
+  it("resolve_args calls back with nil immediately when no sessions exist", function()
+    -- No sessions = no jsonl files; no prefs = no last_session_id
+    local orig_open = io.open
+    io.open = function() return nil end -- no prefs file
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    io.open = orig_open
+    assert.is_nil(callback_result)
+    assert.are.equal(0, #ui_select_calls) -- no picker shown
+  end)
+
+  it("resolve_args calls back with false on cancel when last_id exists", function()
+    -- Has a last_session_id so picker is shown
+    local prefs_content = '{ "/foo/project": { "last_session_id": "abc-123" } }'
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return { read = function() return prefs_content end, close = function() end }
+      end
+      return nil
+    end
+    ui_select_choice = nil -- user cancels
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    io.open = orig_open
+    assert.are.equal(false, callback_result)
+  end)
+
+  it("resolve_args skips prompt and calls nil when skip flag is set", function()
+    -- Manually set skip flag by calling resolve_args with no sessions first
+    local orig_open = io.open
+    io.open = function() return nil end
+    session.resolve_args("/foo/project", function() end) -- sets skip flag
+    io.open = orig_open
+
+    -- Now should skip without showing picker
+    ui_select_calls = {}
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    assert.is_nil(callback_result)
+    assert.are.equal(0, #ui_select_calls)
+  end)
+
+  it("resolve_args shows only Start fresh and Choose session when sessions exist but no last_id", function()
+    -- No saved last_session_id
+    local orig_open = io.open
+    io.open = function() return nil end -- no prefs file
+    -- But sessions exist: mock _list_sessions to return one entry
+    local orig_list = session._list_sessions
+    session._list_sessions = function()
+      return { { id = "abc-123", timestamp = 1000, preview = "Hello", formatted = "2026-01-01  \"Hello\"" } }
+    end
+    local shown_items
+    _G.vim.ui.select = spy.new(function(items, opts, cb)
+      shown_items = items
+      cb(nil, nil) -- cancel
+    end)
+    session.resolve_args("/foo/project", function() end)
+    io.open = orig_open
+    session._list_sessions = orig_list
+    assert.are.equal(2, #shown_items) -- only "Start fresh" and "Choose session..."
+    expect(shown_items[1]).to_match("Start fresh")
+    expect(shown_items[2]).to_match("Choose session")
+    -- No "Restore last session" option
+    for _, item in ipairs(shown_items) do
+      assert.is_false(item:find("Restore last session") ~= nil)
+    end
+  end)
+
+  it("resolve_args returns --resume id when restore last session chosen", function()
+    local prefs_content = '{ "/foo/project": { "last_session_id": "abc-123" } }'
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return { read = function() return prefs_content end, close = function() end }
+      end
+      return nil
+    end
+    ui_select_choice = nil
+    -- We need to pick the second item which contains "Restore last session"
+    _G.vim.ui.select = spy.new(function(items, opts, cb)
+      -- Find restore item
+      for i, item in ipairs(items) do
+        if item:find("Restore last session") then
+          cb(item, i)
+          return
+        end
+      end
+      cb(nil, nil)
+    end)
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    io.open = orig_open
+    expect(callback_result).to_be("--resume abc-123")
+  end)
+
+  it("resolve_args returns nil and sets skip flag when start fresh chosen", function()
+    local prefs_content = '{ "/foo/project": { "last_session_id": "abc-123" } }'
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return { read = function() return prefs_content end, close = function() end }
+      end
+      return nil
+    end
+    _G.vim.ui.select = spy.new(function(items, opts, cb)
+      cb(items[1], 1) -- always pick first = "Start fresh"
+    end)
+    local callback_result = "not-called"
+    session.resolve_args("/foo/project", function(args) callback_result = args end)
+    io.open = orig_open
+    assert.is_nil(callback_result)
+    -- skip flag should now prevent future prompts
+    local second_result = "not-called"
+    local second_ui_calls = 0
+    _G.vim.ui.select = spy.new(function(items, opts, cb)
+      second_ui_calls = second_ui_calls + 1
+      cb(nil, nil)
+    end)
+    session.resolve_args("/foo/project", function(args) second_result = args end)
+    assert.are.equal(0, second_ui_calls) -- no picker shown second time
+    assert.is_nil(second_result)
+  end)
+end)

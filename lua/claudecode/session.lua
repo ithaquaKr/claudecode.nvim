@@ -226,4 +226,95 @@ function M.reset()
   M.is_setup = false
 end
 
+---Resolve which arguments to pass to claude for the given cwd.
+---
+---Calls callback(args) where:
+---  args = nil          -> start fresh (or no sessions available)
+---  args = "--resume X" -> resume session X
+---  args = false        -> user cancelled; do NOT open terminal
+---
+---If no prompt is needed, callback is called synchronously.
+---If a picker is shown, callback is called from vim.ui.select's callback.
+---
+---@param cwd string Raw cwd (e.g. from vim.fn.getcwd())
+---@param callback function function(args: string|nil|false)
+function M.resolve_args(cwd, callback)
+  if not config.enabled then
+    callback(nil)
+    return
+  end
+
+  local canonical = M._canonical_cwd(cwd)
+
+  -- Skip if user already chose "start fresh" this Neovim session
+  if skip_cwd[canonical] then
+    callback(nil)
+    return
+  end
+
+  local sessions = M._list_sessions(cwd)
+  local last_id = M._get_last_session_id(cwd)
+
+  -- If no sessions and no last_id: open fresh silently, no prompt
+  if #sessions == 0 and not last_id then
+    callback(nil)
+    return
+  end
+
+  -- Build picker options
+  local options = {}
+  local handlers = {}
+
+  -- Option 1: Start fresh
+  table.insert(options, "Start fresh (no session)")
+  table.insert(handlers, function()
+    skip_cwd[canonical] = true
+    callback(nil)
+  end)
+
+  -- Option 2: Restore last session (only if we have a saved last_id)
+  if last_id then
+    local last_preview = "(unknown)"
+    for _, s in ipairs(sessions) do
+      if s.id == last_id then
+        last_preview = s.formatted
+        break
+      end
+    end
+    table.insert(options, "Restore last session  (" .. last_preview .. ")")
+    table.insert(handlers, function()
+      M._save_last_session_id(cwd, last_id)
+      callback("--resume " .. last_id)
+    end)
+  end
+
+  -- Option 3: Choose session (only if there are sessions to choose from)
+  if #sessions > 0 then
+    table.insert(options, "Choose session...")
+    table.insert(handlers, function()
+      local session_labels = {}
+      for _, s in ipairs(sessions) do
+        table.insert(session_labels, s.formatted)
+      end
+      vim.ui.select(session_labels, { prompt = "Choose Claude session:" }, function(choice, idx)
+        if not choice or not idx then
+          callback(false)
+          return
+        end
+        local selected = sessions[idx]
+        M._save_last_session_id(cwd, selected.id)
+        callback("--resume " .. selected.id)
+      end)
+    end)
+  end
+
+  vim.ui.select(options, { prompt = "Select Claude session:" }, function(choice, idx)
+    if not choice or not idx then
+      callback(false)
+      return
+    end
+    handlers[idx]()
+  end)
+end
+
 return M
