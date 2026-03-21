@@ -140,6 +140,79 @@ function M._list_sessions(cwd)
   return sessions
 end
 
+-- Path to preferences file
+local function get_prefs_path()
+  return vim.fn.stdpath("data") .. "/claudecode/sessions.json"
+end
+
+---Read preferences from disk. Returns empty table on any error.
+---@return table prefs Map of canonical_cwd -> { last_session_id, updated_at }
+local function read_prefs()
+  local path = get_prefs_path()
+  local file = io.open(path, "r")
+  if not file then
+    return {}
+  end
+  local content = file:read("*a")
+  file:close()
+  if not content or content == "" then
+    return {}
+  end
+  local ok, data = pcall(vim.json.decode, content)
+  if not ok or type(data) ~= "table" then
+    return {}
+  end
+  return data
+end
+
+---Write preferences to disk atomically (temp file + rename).
+---@param prefs table Map to persist
+---@return boolean success
+local function write_prefs(prefs)
+  local path = get_prefs_path()
+  local dir = vim.fn.fnamemodify(path, ":h")
+  vim.fn.mkdir(dir, "p")
+
+  local content = vim.json.encode(prefs)
+  local tmp_path = path .. ".tmp"
+
+  local fd = vim.loop.fs_open(tmp_path, "w", 438) -- 0666
+  if not fd then
+    local logger = require("claudecode.logger")
+    logger.warn("session", "Failed to write session preferences: could not open " .. tmp_path)
+    return false
+  end
+  vim.loop.fs_write(fd, content, 0)
+  vim.loop.fs_close(fd)
+  return vim.loop.fs_rename(tmp_path, path) ~= false
+end
+
+---Get the last saved session ID for the given cwd.
+---@param cwd string Raw cwd path
+---@return string|nil session_id UUID or nil if not saved
+function M._get_last_session_id(cwd)
+  local canonical = M._canonical_cwd(cwd)
+  local prefs = read_prefs()
+  local entry = prefs[canonical]
+  if type(entry) == "table" then
+    return entry.last_session_id
+  end
+  return nil
+end
+
+---Save the last session ID for the given cwd.
+---@param cwd string Raw cwd path
+---@param session_id string UUID to save
+function M._save_last_session_id(cwd, session_id)
+  local canonical = M._canonical_cwd(cwd)
+  local prefs = read_prefs()
+  prefs[canonical] = {
+    last_session_id = session_id,
+    updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  write_prefs(prefs)
+end
+
 ---Configure the session module. Called from init.lua's M.setup().
 ---@param opts table { enabled: boolean }
 function M.setup(opts)

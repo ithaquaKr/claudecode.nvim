@@ -260,3 +260,107 @@ describe("session: JSONL preview parsing", function()
     expect(result).to_be("(no preview)")
   end)
 end)
+
+describe("session: preferences file", function()
+  local session
+  local fake_prefs_path = "/tmp/test-sessions.json"
+
+  before_each(function()
+    package.loaded["claudecode.session"] = nil
+    _G.vim.fn = _G.vim.fn or {}
+    _G.vim.fn.resolve = spy.new(function(p) return p end)
+    _G.vim.fn.fnamemodify = spy.new(function(p, mod)
+      if mod == ":p" then return p:sub(-1) == "/" and p or p .. "/" end
+      if mod == ":h" then return p:match("(.+)/[^/]+$") or p end
+      return p
+    end)
+    _G.vim.fn.stdpath = spy.new(function() return "/tmp/nvim-test-data" end)
+    _G.vim.fn.expand = spy.new(function(p) return p end)
+    _G.vim.fn.mkdir = spy.new(function() return 1 end)
+    _G.vim.loop = {
+      fs_opendir = spy.new(function() return nil end),
+      fs_stat = spy.new(function() return nil end),
+      fs_open = spy.new(function() return nil end),
+      fs_write = spy.new(function() return true end),
+      fs_close = spy.new(function() end),
+      fs_rename = spy.new(function() return true end),
+    }
+    _G.vim.json = {}
+    _G.vim.json.encode = function(t) return _G.json_encode(t) end
+    _G.vim.json.decode = function(s) return _G.json_decode(s) end
+    session = require("claudecode.session")
+    session.setup({ enabled = true })
+  end)
+
+  it("get_last_session_id returns nil when prefs file does not exist", function()
+    -- io.open returning nil simulates missing file
+    local orig_open = io.open
+    io.open = function(path, mode) return nil end
+    local result = session._get_last_session_id("/Users/foo/project")
+    io.open = orig_open
+    assert.is_nil(result)
+  end)
+
+  it("get_last_session_id returns id from prefs file", function()
+    local prefs_content = '{ "/Users/foo/project": { "last_session_id": "abc-123", "updated_at": "2026-01-01" } }'
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return {
+          read = function(self, fmt) return prefs_content end,
+          close = function() end,
+        }
+      end
+      return nil
+    end
+    local result = session._get_last_session_id("/Users/foo/project")
+    io.open = orig_open
+    expect(result).to_be("abc-123")
+  end)
+
+  it("get_last_session_id returns nil for cwd not in prefs", function()
+    local prefs_content = '{ "/other/project": { "last_session_id": "xyz" } }'
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return {
+          read = function(self, fmt) return prefs_content end,
+          close = function() end,
+        }
+      end
+      return nil
+    end
+    local result = session._get_last_session_id("/Users/foo/project")
+    io.open = orig_open
+    assert.is_nil(result)
+  end)
+
+  it("get_last_session_id returns nil on malformed JSON", function()
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then
+        return {
+          read = function(self, fmt) return "not json {{{{" end,
+          close = function() end,
+        }
+      end
+      return nil
+    end
+    local result = session._get_last_session_id("/Users/foo/project")
+    io.open = orig_open
+    assert.is_nil(result)
+  end)
+
+  it("save_last_session_id writes prefs via atomic rename", function()
+    local orig_open = io.open
+    io.open = function(path, mode)
+      if mode == "r" then return nil end -- no existing prefs
+      return nil
+    end
+    io.open = orig_open
+    _G.vim.loop.fs_open = spy.new(function() return 42 end) -- return fake fd
+    session._save_last_session_id("/Users/foo/project", "new-session-id")
+    assert.spy(_G.vim.loop.fs_open).was_called()
+    assert.spy(_G.vim.loop.fs_rename).was_called()
+  end)
+end)
