@@ -1,0 +1,156 @@
+---@brief [[
+--- Per-directory Claude session management.
+--- Handles session listing, preference persistence, and picker UI.
+---@brief ]]
+---@module 'claudecode.session'
+
+local M = {}
+
+-- Module config (set via setup())
+local config = { enabled = true }
+
+-- In-memory: cwd paths where user chose "start fresh" this Neovim session
+-- { [canonical_cwd] = true }
+local skip_cwd = {}
+
+-- Whether setup() has been called
+M.is_setup = false
+
+---Canonicalise a cwd path: resolve symlinks, ensure absolute, strip trailing slash.
+---@param raw string Raw path (e.g. from vim.fn.getcwd())
+---@return string canonical Normalised absolute path without trailing slash
+function M._canonical_cwd(raw)
+  local resolved = vim.fn.resolve(raw)
+  local absolute = vim.fn.fnamemodify(resolved, ":p")
+  return absolute:gsub("/$", "")
+end
+
+---Hash a canonical cwd to match Claude CLI's project directory naming.
+---Claude replaces all '/' with '-' in the path.
+---Note: this has a theoretical collision risk (e.g. /foo/bar vs /foo-bar)
+---but is intentional — it must match Claude CLI's own convention.
+---@param canonical string Canonical cwd from _canonical_cwd()
+---@return string hash Directory name used by Claude CLI
+function M._hash_cwd(canonical)
+  return canonical:gsub("/", "-")
+end
+
+---Parse the last user message preview from a Claude session JSONL file.
+---@param path string Absolute path to the .jsonl file
+---@return string preview Up to 60 chars of the last user message, or "(no preview)"
+function M._parse_session_preview(path)
+  local file = io.open(path, "r")
+  if not file then
+    return "(no preview)"
+  end
+
+  local last_user_text = nil
+  for line in file:lines() do
+    local ok, entry = pcall(vim.json.decode, line)
+    if ok and type(entry) == "table" and entry.type == "user" then
+      local msg = entry.message
+      if type(msg) == "table" and msg.role == "user" then
+        local content = msg.content
+        local text = nil
+        if type(content) == "string" then
+          text = content
+        elseif type(content) == "table" then
+          for _, c in ipairs(content) do
+            if type(c) == "table" and c.type == "text" and type(c.text) == "string" then
+              text = c.text
+              break
+            end
+          end
+        end
+        if text and type(text) == "string" then
+          -- Strip command message XML tags (Claude Code slash commands)
+          text = text:gsub("<command%-message>.-</command%-message>", "")
+          text = text:gsub("<command%-name>.-</command%-name>", "")
+          text = text:match("^%s*(.-)%s*$") -- trim
+          if text ~= "" then
+            last_user_text = text
+          end
+        end
+      end
+    end
+  end
+  file:close()
+
+  if not last_user_text then
+    return "(no preview)"
+  end
+
+  if #last_user_text > 60 then
+    return last_user_text:sub(1, 60) .. "..."
+  end
+  return last_user_text
+end
+
+---List all Claude sessions for a given cwd, sorted newest first.
+---@param cwd string Raw cwd (will be canonicalised internally)
+---@return table sessions Array of {id, timestamp, formatted} tables
+function M._list_sessions(cwd)
+  local canonical = M._canonical_cwd(cwd)
+  local hash = M._hash_cwd(canonical)
+  local projects_base = vim.fn.expand("~/.claude/projects/")
+  local dir = projects_base .. hash .. "/"
+
+  local handle = vim.loop.fs_opendir(dir, nil, 100)
+  if not handle then
+    return {}
+  end
+
+  -- fs_readdir is an iterator — loop until it returns nil to get all entries
+  local entries = {}
+  while true do
+    local batch = vim.loop.fs_readdir(handle)
+    if not batch then
+      break
+    end
+    for _, e in ipairs(batch) do
+      table.insert(entries, e)
+    end
+  end
+  vim.loop.fs_closedir(handle)
+
+  local sessions = {}
+  for _, entry in ipairs(entries) do
+    if entry.type == "file" and entry.name:match("%.jsonl$") then
+      local id = entry.name:gsub("%.jsonl$", "")
+      local full_path = dir .. entry.name
+      local stat = vim.loop.fs_stat(full_path)
+      if stat then -- intentional: guard against TOCTOU (file deleted between readdir and stat)
+        local ts = stat.mtime.sec
+        local preview = M._parse_session_preview(full_path)
+        local date_str = os.date("%Y-%m-%d %H:%M", ts)
+        table.insert(sessions, {
+          id = id,
+          timestamp = ts,
+          preview = preview,
+          formatted = date_str .. '  "' .. preview .. '"',
+        })
+      end
+    end
+  end
+
+  table.sort(sessions, function(a, b)
+    return a.timestamp > b.timestamp
+  end)
+
+  return sessions
+end
+
+---Configure the session module. Called from init.lua's M.setup().
+---@param opts table { enabled: boolean }
+function M.setup(opts)
+  config = vim.tbl_deep_extend("force", { enabled = true }, opts or {})
+  M.is_setup = true
+end
+
+---Clear all in-memory state. Called from init.lua's M.stop().
+function M.reset()
+  skip_cwd = {}
+  M.is_setup = false
+end
+
+return M
