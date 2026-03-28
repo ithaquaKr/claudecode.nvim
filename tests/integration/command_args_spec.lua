@@ -164,6 +164,15 @@ describe("ClaudeCode command arguments integration", function()
         return {
           setup = function() end,
         }
+      elseif mod == "claudecode.session" then
+        return {
+          setup = function() end,
+          reset = function() end,
+          is_setup = false,
+          resolve_args = function(_cwd, callback)
+            callback(nil)
+          end,
+        }
       elseif mod == "claudecode.logger" then
         return {
           setup = function() end,

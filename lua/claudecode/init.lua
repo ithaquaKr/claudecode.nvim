@@ -267,7 +267,7 @@ function M._ensure_terminal_visible_if_connected()
   local is_visible = bufinfo and #bufinfo.windows > 0
 
   if not is_visible then
-    terminal.simple_toggle()
+    terminal.ensure_visible()
   end
 
   return true
@@ -360,6 +360,17 @@ function M.setup(opts)
     end
   else
     logger.error("init", "Failed to load claudecode.terminal module for setup.")
+  end
+
+  local session_setup_ok, session_module = pcall(require, "claudecode.session")
+  if session_setup_ok then
+    -- Guard in case tests or user replace the module with a minimal stub without `setup`.
+    if type(session_module.setup) == "function" then
+      session_module.setup(M.state.config.session_management)
+    end
+  else
+    -- Session module is optional; warn rather than error since core features still work
+    logger.warn("init", "Failed to load claudecode.session module for setup.")
   end
 
   local diff = require("claudecode.diff")
@@ -516,6 +527,12 @@ function M.stop()
 
   -- Clear any queued @ mentions when server stops
   clear_mention_queue()
+
+  -- Reset session module in-memory state
+  local session_ok, session_module = pcall(require, "claudecode.session")
+  if session_ok and type(session_module.reset) == "function" then -- Guard in case minimal stub
+    session_module.reset()
+  end
 
   logger.info("init", "Claude Code integration stopped")
 

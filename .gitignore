@@ -64,4 +64,6 @@ luacov.stats.out
 .claude/*
 !.claude/settings.json
 !.claude/hooks/
-docs/superpowers/*
+
+# Superpowers AI-generated docs and plans (not for version control)
+docs/superpowers/
