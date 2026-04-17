@@ -123,35 +123,116 @@ local function find_editor_win()
   return cur
 end
 
---- Open a split window from a proper editor window and show a buffer in it.
---- When bufnr is nil a fresh empty buffer (enew) is used — suitable for new terminals.
---- When bufnr is given the existing buffer (e.g. a running terminal) is displayed.
----@param bufnr number|nil Existing buffer to show, or nil to create a fresh one
----@return number winid The new split window ID
-local function open_in_split(bufnr)
+--- Resolve split geometry from config.
+---@return string placement, number width
+local function split_params()
   local side = _cfg.split_side or "right"
   local pct = _cfg.split_width_percentage or 0.30
-  local width = math.floor(vim.o.columns * pct)
-  local placement = (side == "right") and "botright" or "topleft"
+  return (side == "right") and "botright" or "topleft", math.floor(vim.o.columns * pct)
+end
 
-  -- Always split from a real editor window, never from a floating window or
-  -- a terminal buffer — otherwise window layout and <C-w> navigation break.
-  vim.api.nvim_set_current_win(find_editor_win())
+--- Redirect the current window to a proper editor window when needed.
+--- Only acts if the current window is floating (e.g. a closed picker) or a terminal buffer.
+--- Mirrors native.lua: splits from wherever the user is unless that's impossible.
+local function ensure_editor_win()
+  local cur = vim.api.nvim_get_current_win()
+  local cfg = vim.api.nvim_win_get_config(cur)
+  local is_float = cfg.relative and cfg.relative ~= ""
+  local is_term = vim.bo[vim.api.nvim_win_get_buf(cur)].buftype == "terminal"
+  if is_float or is_term then
+    vim.api.nvim_set_current_win(find_editor_win())
+  end
+end
+
+--- Spawn a new Claude terminal session.
+--- Mirrors native.lua's open_terminal: splits from the user's current window,
+--- calls termopen in the new split, sets bufhidden=hide, then enters insert mode.
+---@param cmd_string string Full Claude CLI command string
+---@param env table Environment variables
+---@param label string Display label
+---@param cwd string Working directory
+---@param claude_session_id string|nil Claude CLI session UUID
+local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
+  ensure_editor_win()
+  local original_win = vim.api.nvim_get_current_win()
+  local placement, width = split_params()
 
   vim.cmd(placement .. " " .. width .. "vsplit")
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_height(win, vim.o.lines)
+  local new_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(new_win, vim.o.lines)
 
-  if bufnr then
-    vim.api.nvim_win_set_buf(win, bufnr)
-  else
-    -- Use enew so termopen gets a clean, unnamed buffer (same as native provider)
-    vim.api.nvim_win_call(win, function()
-      vim.cmd("enew")
-    end)
+  vim.api.nvim_win_call(new_win, function()
+    vim.cmd("enew")
+  end)
+
+  local cmd_arg = cmd_string:find(" ", 1, true)
+    and vim.split(cmd_string, " ", { plain = true, trimempty = false })
+    or { cmd_string }
+
+  local session_id = gen_id()
+  ---@type ClaudeSessionEntry
+  local entry = {
+    id = session_id,
+    bufnr = -1,
+    jobid = -1,
+    label = label,
+    cwd = cwd,
+    claude_session_id = claude_session_id,
+    status = "active",
+    created_at = os.time(),
+  }
+
+  local jobid = vim.fn.termopen(cmd_arg, {
+    env = env,
+    cwd = cwd,
+    on_exit = function(_, _, _)
+      vim.schedule(function()
+        local s = find_by_id(session_id)
+        if not s then
+          return
+        end
+        s.status = "dead"
+        if active_id == session_id then
+          active_id = nil
+        end
+        if _cfg.auto_close ~= false then
+          hide_buf_windows(s.bufnr)
+        end
+      end)
+    end,
+  })
+
+  if not jobid or jobid <= 0 then
+    vim.notify("claudecode: failed to start claude process", vim.log.levels.ERROR)
+    vim.api.nvim_set_current_win(original_win)
+    return
   end
 
-  return win
+  -- Read buffer after termopen — matches native.lua (termopen may allocate a new buf)
+  entry.bufnr = vim.api.nvim_get_current_buf()
+  entry.jobid = jobid
+  vim.bo[entry.bufnr].bufhidden = "hide"
+  table.insert(sessions, entry)
+  active_id = session_id
+
+  vim.api.nvim_set_current_win(new_win)
+  vim.cmd("startinsert")
+end
+
+--- Show an existing session buffer in a new split.
+--- Mirrors native.lua's show_hidden_terminal: splits from the user's current window,
+--- sets the existing buffer, does NOT enter insert mode (terminal keeps its own state).
+---@param s ClaudeSessionEntry
+---@return number new_win
+local function show_existing_terminal(s)
+  ensure_editor_win()
+  local placement, width = split_params()
+
+  vim.cmd(placement .. " " .. width .. "vsplit")
+  local new_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(new_win, vim.o.lines)
+  vim.api.nvim_win_set_buf(new_win, s.bufnr)
+  return new_win
 end
 
 --- Extract plain text from a Claude message content field.
@@ -308,71 +389,6 @@ local function derive_label(resolved_args, cwd)
   return "Session " .. sid:sub(1, 8) .. "…"
 end
 
---- Core: spawn a terminal process in an already-open split window.
---- The split must already be open and be the current window.
----@param win number Window ID where the terminal should open
----@param cmd string Claude CLI command string
----@param env table Environment variables
----@param label string Display label for the session
----@param cwd string Working directory
----@param claude_session_id string|nil Claude CLI session UUID (nil for fresh sessions)
-local function spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
-  local bufnr = vim.api.nvim_win_get_buf(win)
-  local session_id = gen_id()
-
-  ---@type ClaudeSessionEntry
-  local entry = {
-    id = session_id,
-    bufnr = bufnr,
-    jobid = -1,
-    label = label,
-    cwd = cwd,
-    claude_session_id = claude_session_id,
-    status = "active",
-    created_at = os.time(),
-  }
-
-  local cmd_list = cmd:find(" ", 1, true)
-      and vim.split(cmd, " ", { plain = true, trimempty = true })
-    or { cmd }
-  local jobid = vim.fn.termopen(cmd_list, {
-    env = env,
-    cwd = cwd,
-    on_exit = function(_, _, _)
-      vim.schedule(function()
-        local s = find_by_id(session_id)
-        if not s then
-          return
-        end
-        s.status = "dead"
-        if active_id == session_id then
-          active_id = nil
-        end
-        if _cfg.auto_close ~= false then
-          hide_buf_windows(s.bufnr)
-        end
-      end)
-    end,
-  })
-
-  if not jobid or jobid <= 0 then
-    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-    vim.notify("claudecode: failed to start claude process", vim.log.levels.ERROR)
-    return
-  end
-
-  -- termopen may have allocated a new buffer number; read it back
-  entry.bufnr = vim.api.nvim_win_get_buf(win)
-  entry.jobid = jobid
-  vim.bo[entry.bufnr].bufhidden = "hide"
-  table.insert(sessions, entry)
-  active_id = session_id
-
-  -- Defer startinsert so any typeahead queued before the terminal opens is flushed first
-  vim.schedule(function()
-    vim.cmd("startinsert")
-  end)
-end
 
 --- Hide the currently active session's window (keeps process running).
 local function hide_active()
@@ -408,8 +424,7 @@ function M.new_session(forced_args)
     local cmd, env = build_cmd_env(resolved_args)
 
     hide_active()
-    local win = open_in_split(nil)
-    spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
+    open_new_terminal(cmd, env, label, cwd, claude_session_id)
   end
 
   if forced_args then
@@ -455,8 +470,7 @@ function M.resume_session(claude_session_id, cwd)
   local cmd, env = build_cmd_env(resolved_args)
 
   hide_active()
-  local win = open_in_split(nil)
-  spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
+  open_new_terminal(cmd, env, label, cwd, claude_session_id)
 end
 
 --- Switch to a running session by its internal terminal ID.
@@ -475,24 +489,18 @@ function M.switch_to(session_id)
   end
 
   if session_id == active_id then
-    -- Already active — just ensure it's visible
     if not is_buf_visible(s.bufnr) then
-      open_in_split(s.bufnr)
-      vim.schedule(function()
-        vim.cmd("startinsert")
-      end)
+      show_existing_terminal(s)
+      vim.cmd("startinsert")
     end
     return
   end
 
   hide_active()
-  open_in_split(s.bufnr)
+  show_existing_terminal(s)
   s.status = "active"
   active_id = session_id
-  -- Defer startinsert so any typeahead from picker/<CR> is flushed first
-  vim.schedule(function()
-    vim.cmd("startinsert")
-  end)
+  vim.cmd("startinsert")
 end
 
 --- Kill (terminate and remove) a running session by its internal terminal ID.
@@ -540,11 +548,9 @@ function M.toggle()
       if is_buf_visible(s.bufnr) then
         hide_active()
       else
-        open_in_split(s.bufnr)
+        show_existing_terminal(s)
         s.status = "active"
-        vim.schedule(function()
-          vim.cmd("startinsert")
-        end)
+        vim.cmd("startinsert")
       end
       return
     end
@@ -556,12 +562,10 @@ function M.toggle()
   for i = #cwd_sessions, 1, -1 do
     local s = cwd_sessions[i]
     if s.status == "background" and vim.api.nvim_buf_is_valid(s.bufnr) then
-      open_in_split(s.bufnr)
+      show_existing_terminal(s)
       s.status = "active"
       active_id = s.id
-      vim.schedule(function()
-        vim.cmd("startinsert")
-      end)
+      vim.cmd("startinsert")
       return
     end
   end
@@ -598,8 +602,9 @@ function M.focus_toggle()
           end
         end
       else
-        open_in_split(s.bufnr)
+        show_existing_terminal(s)
         s.status = "active"
+        vim.cmd("startinsert")
       end
       return
     end
