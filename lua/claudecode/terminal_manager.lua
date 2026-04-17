@@ -357,7 +357,10 @@ local function spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
   table.insert(sessions, entry)
   active_id = session_id
 
-  vim.cmd("startinsert")
+  -- Defer startinsert so any typeahead queued before the terminal opens is flushed first
+  vim.schedule(function()
+    vim.cmd("startinsert")
+  end)
 end
 
 --- Hide the currently active session's window (keeps process running).
@@ -458,6 +461,9 @@ function M.switch_to(session_id)
     -- Already active — just ensure it's visible
     if not is_buf_visible(s.bufnr) then
       open_in_split(s.bufnr)
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
     end
     return
   end
@@ -466,6 +472,10 @@ function M.switch_to(session_id)
   open_in_split(s.bufnr)
   s.status = "active"
   active_id = session_id
+  -- Defer startinsert so any typeahead from picker/<CR> is flushed first
+  vim.schedule(function()
+    vim.cmd("startinsert")
+  end)
 end
 
 --- Kill (terminate and remove) a running session by its internal terminal ID.
@@ -515,6 +525,9 @@ function M.toggle()
       else
         open_in_split(s.bufnr)
         s.status = "active"
+        vim.schedule(function()
+          vim.cmd("startinsert")
+        end)
       end
       return
     end
@@ -529,6 +542,9 @@ function M.toggle()
       open_in_split(s.bufnr)
       s.status = "active"
       active_id = s.id
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
       return
     end
   end
@@ -702,8 +718,11 @@ function M.show_picker(cwd)
       if not item then
         return
       end
+      -- Schedule both paths so the picker fully closes before we manipulate windows
       if item.kind == "running" and item.terminal_id then
-        M.switch_to(item.terminal_id)
+        vim.schedule(function()
+          M.switch_to(item.terminal_id)
+        end)
       elseif item.kind == "inactive" and item.claude_session_id then
         vim.schedule(function()
           M.resume_session(item.claude_session_id, cwd)
