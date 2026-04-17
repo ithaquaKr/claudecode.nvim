@@ -216,7 +216,10 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
   active_id = session_id
 
   vim.api.nvim_set_current_win(new_win)
-  vim.cmd("startinsert")
+  -- Defer startinsert so any typeahead queued before the terminal opens is flushed first
+  vim.schedule(function()
+    vim.cmd("startinsert")
+  end)
 end
 
 --- Show an existing session buffer in a new split.
@@ -491,7 +494,9 @@ function M.switch_to(session_id)
   if session_id == active_id then
     if not is_buf_visible(s.bufnr) then
       show_existing_terminal(s)
-      vim.cmd("startinsert")
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
     end
     return
   end
@@ -500,7 +505,10 @@ function M.switch_to(session_id)
   show_existing_terminal(s)
   s.status = "active"
   active_id = session_id
-  vim.cmd("startinsert")
+  -- Defer startinsert so any typeahead from picker/<CR> is flushed first
+  vim.schedule(function()
+    vim.cmd("startinsert")
+  end)
 end
 
 --- Kill (terminate and remove) a running session by its internal terminal ID.
@@ -550,7 +558,9 @@ function M.toggle()
       else
         show_existing_terminal(s)
         s.status = "active"
-        vim.cmd("startinsert")
+        vim.schedule(function()
+          vim.cmd("startinsert")
+        end)
       end
       return
     end
@@ -565,7 +575,9 @@ function M.toggle()
       show_existing_terminal(s)
       s.status = "active"
       active_id = s.id
-      vim.cmd("startinsert")
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
       return
     end
   end
@@ -604,7 +616,9 @@ function M.focus_toggle()
       else
         show_existing_terminal(s)
         s.status = "active"
-        vim.cmd("startinsert")
+        vim.schedule(function()
+          vim.cmd("startinsert")
+        end)
       end
       return
     end
