@@ -144,6 +144,93 @@ local function open_in_split(bufnr)
   return win
 end
 
+--- Extract plain text from a Claude message content field.
+--- Content can be a plain string or an array of {type,text} blocks.
+---@param content any
+---@return string
+local function extract_text_from_content(content)
+  if type(content) == "string" then
+    return content
+  end
+  if type(content) ~= "table" then
+    return ""
+  end
+  local parts = {}
+  for _, block in ipairs(content) do
+    if type(block) == "table" and block.type == "text" and type(block.text) == "string" then
+      table.insert(parts, block.text)
+    end
+  end
+  return table.concat(parts, "\n")
+end
+
+--- Read a Claude CLI session JSONL file and return formatted lines for preview.
+--- Shows the conversation exchanges (user + assistant turns only) as markdown.
+--- Reads only the tail of large files for performance.
+---@param session_file string Absolute path to the .jsonl file
+---@return string[]
+local function parse_session_for_preview(session_file)
+  local file = io.open(session_file, "r")
+  if not file then
+    return { "(could not open session file)" }
+  end
+
+  -- Collect all lines first; for large files we only care about the tail
+  local raw_lines = {}
+  for line in file:lines() do
+    table.insert(raw_lines, line)
+  end
+  file:close()
+
+  -- Process only the last 300 lines to keep parsing fast
+  local start_idx = math.max(1, #raw_lines - 300)
+  local turns = {}
+
+  for i = start_idx, #raw_lines do
+    local ok, entry = pcall(vim.json.decode, raw_lines[i])
+    if ok and type(entry) == "table" then
+      local role = entry.type -- "user" or "assistant"
+      if (role == "user" or role == "assistant") and type(entry.message) == "table" then
+        local text = extract_text_from_content(entry.message.content)
+        -- Strip internal command/tool XML noise Claude CLI injects
+        text = text:gsub("<command%-message>.-</command%-message>", "")
+        text = text:gsub("<command%-name>.-</command%-name>", "")
+        text = text:match("^%s*(.-)%s*$") or text
+        if text ~= "" then
+          table.insert(turns, { role = role, text = text })
+        end
+      end
+    end
+  end
+
+  if #turns == 0 then
+    return { "(no conversation content found)" }
+  end
+
+  -- Format the last 20 turns as markdown
+  local lines = {}
+  local show_from = math.max(1, #turns - 20)
+  if show_from > 1 then
+    table.insert(lines, string.format("*… %d earlier exchanges not shown …*", show_from - 1))
+    table.insert(lines, "")
+  end
+
+  for i = show_from, #turns do
+    local turn = turns[i]
+    local header = turn.role == "user" and "## 👤 User" or "## 🤖 Claude"
+    table.insert(lines, header)
+    table.insert(lines, "")
+    for _, l in ipairs(vim.split(turn.text, "\n", { plain = true })) do
+      table.insert(lines, l)
+    end
+    table.insert(lines, "")
+    table.insert(lines, "---")
+    table.insert(lines, "")
+  end
+
+  return lines
+end
+
 --- Build claude command string and environment table.
 ---@param resolved_args string|nil Args from session picker (e.g. "--resume UUID")
 ---@return string cmd, table env
@@ -235,7 +322,10 @@ local function spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
     created_at = os.time(),
   }
 
-  local jobid = vim.fn.termopen(cmd, {
+  local cmd_list = cmd:find(" ", 1, true)
+      and vim.split(cmd, " ", { plain = true, trimempty = true })
+    or { cmd }
+  local jobid = vim.fn.termopen(cmd_list, {
     env = env,
     cwd = cwd,
     on_exit = function(_, _, _)
@@ -368,7 +458,6 @@ function M.switch_to(session_id)
     -- Already active — just ensure it's visible
     if not is_buf_visible(s.bufnr) then
       open_in_split(s.bufnr)
-      vim.cmd("startinsert")
     end
     return
   end
@@ -377,7 +466,6 @@ function M.switch_to(session_id)
   open_in_split(s.bufnr)
   s.status = "active"
   active_id = session_id
-  vim.cmd("startinsert")
 end
 
 --- Kill (terminate and remove) a running session by its internal terminal ID.
@@ -427,7 +515,6 @@ function M.toggle()
       else
         open_in_split(s.bufnr)
         s.status = "active"
-        vim.cmd("startinsert")
       end
       return
     end
@@ -442,7 +529,6 @@ function M.toggle()
       open_in_split(s.bufnr)
       s.status = "active"
       active_id = s.id
-      vim.cmd("startinsert")
       return
     end
   end
@@ -503,9 +589,23 @@ function M.show_picker(cwd)
   cwd = cwd or vim.fn.getcwd()
 
   --- Build merged item list from running terminals + Claude CLI session files.
+  --- Each item includes a `session_file` path so the preview function can read it.
   ---@return table[]
   local function build_items()
     local items = {}
+
+    -- Resolve the session directory once for file path construction
+    local session_dir = nil
+    local session_ok, session_module = pcall(require, "claudecode.session")
+    if session_ok then
+      local ok_c, canonical = pcall(session_module._canonical_cwd, cwd)
+      if ok_c then
+        local ok_h, hash = pcall(session_module._hash_cwd, canonical)
+        if ok_h then
+          session_dir = vim.fn.expand("~/.claude/projects/") .. hash .. "/"
+        end
+      end
+    end
 
     -- Running terminal sessions indexed by their claude_session_id (for dedup below)
     local running_by_claude_id = {}
@@ -524,12 +624,12 @@ function M.show_picker(cwd)
           kind = "running",
           terminal_id = s.id,
           session_status = s.status,
+          session_file = nil, -- no JSONL file for anonymous sessions
         })
       end
     end
 
-    -- 2. Claude CLI session files — running ones first, then inactive
-    local session_ok, session_module = pcall(require, "claudecode.session")
+    -- 2. Claude CLI session files — running ones annotated with live status
     if session_ok then
       local ok2, claude_sessions = pcall(session_module._list_sessions, cwd)
       if ok2 and claude_sessions then
@@ -538,7 +638,6 @@ function M.show_picker(cwd)
           local icon, kind, status
 
           if running then
-            -- Live terminal attached to this Claude session
             if running.status == "active" then
               icon = "● "
             elseif running.status == "background" then
@@ -549,14 +648,14 @@ function M.show_picker(cwd)
             kind = "running"
             status = running.status
           else
-            -- Historical session, no running terminal
             icon = "  "
             kind = "inactive"
             status = "inactive"
           end
 
-          local preview = (cs.preview and cs.preview ~= "(no preview)") and cs.preview or cs.id:sub(1, 8) .. "…"
-          local label = #preview > 55 and (preview:sub(1, 52) .. "…") or preview
+          local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview
+            or cs.id:sub(1, 8) .. "…"
+          local label = #preview_text > 55 and (preview_text:sub(1, 52) .. "…") or preview_text
 
           table.insert(items, {
             text = icon .. label,
@@ -564,6 +663,7 @@ function M.show_picker(cwd)
             terminal_id = running and running.id or nil,
             claude_session_id = cs.id,
             session_status = status,
+            session_file = session_dir and (session_dir .. cs.id .. ".jsonl") or nil,
           })
         end
       end
@@ -573,6 +673,7 @@ function M.show_picker(cwd)
       table.insert(items, {
         text = "  No sessions — press <C-n> to open one",
         kind = "hint",
+        session_file = nil,
       })
     end
 
@@ -583,6 +684,19 @@ function M.show_picker(cwd)
     title = "Claude Code Sessions",
     items = build_items(),
     format = "text",
+    -- Show conversation content from the Claude CLI session JSONL file
+    preview = function(ctx)
+      local item = ctx.item
+      if not item or not item.session_file then
+        return false
+      end
+      local lines = parse_session_for_preview(item.session_file)
+      vim.bo[ctx.buf].modifiable = true
+      vim.api.nvim_buf_set_lines(ctx.buf, 0, -1, false, lines)
+      vim.bo[ctx.buf].filetype = "markdown"
+      vim.bo[ctx.buf].modifiable = false
+      return true
+    end,
     confirm = function(picker, item)
       picker:close()
       if not item then
@@ -591,7 +705,6 @@ function M.show_picker(cwd)
       if item.kind == "running" and item.terminal_id then
         M.switch_to(item.terminal_id)
       elseif item.kind == "inactive" and item.claude_session_id then
-        -- Resume this historical session; opens a new terminal with --resume
         vim.schedule(function()
           M.resume_session(item.claude_session_id, cwd)
         end)
@@ -601,7 +714,6 @@ function M.show_picker(cwd)
       kill_session = function(picker)
         local item = picker:current()
         if not item or item.kind ~= "running" or not item.terminal_id then
-          -- Inactive sessions have no running terminal to kill
           return
         end
         M.kill_session(item.terminal_id)
