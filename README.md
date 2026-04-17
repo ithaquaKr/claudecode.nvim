@@ -42,6 +42,10 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
       desc = "Add file",
       ft = { "NvimTree", "neo-tree", "oil", "minifiles", "netrw" },
     },
+    -- Multi-session management
+    { "<leader>an", "<cmd>ClaudeCodeSessionNew<cr>", desc = "New Claude session" },
+    { "<leader>a<Tab>", "<cmd>ClaudeCodeSessionSwitch<cr>", desc = "Switch Claude session" },
+    { "<leader>ak", "<cmd>ClaudeCodeSessionKill<cr>", desc = "Kill active Claude session" },
     -- Diff management
     { "<leader>aa", "<cmd>ClaudeCodeDiffAccept<cr>", desc = "Accept diff" },
     { "<leader>ad", "<cmd>ClaudeCodeDiffDeny<cr>", desc = "Deny diff" },

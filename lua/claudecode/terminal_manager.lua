@@ -1,16 +1,24 @@
 ---Multi-session terminal management for claudecode.nvim.
 ---Manages multiple running Claude CLI terminal sessions per working directory,
 ---with show/hide (background) support and a Snacks-based quick switcher.
+---
+---The switcher merges two sources:
+---  • Running terminals tracked by this module (active / background / dead)
+---  • Historical Claude CLI session files in ~/.claude/projects/{hash}/
+---Sessions that appear in both are shown with a live-status icon; sessions
+---that only exist on disk (no running terminal) are shown as "inactive" and
+---can be re-activated (equivalent to --resume) by selecting them.
 ---@module 'claudecode.terminal_manager'
 
 local M = {}
 
 ---@class ClaudeSessionEntry
----@field id string Unique internal ID for this terminal session
+---@field id string Unique internal ID for this Neovim terminal instance
 ---@field bufnr number Neovim buffer number
 ---@field jobid number Terminal job ID (from vim.fn.termopen)
----@field label string Display label (from Claude session file preview)
+---@field label string Display label (Claude session preview or "New Session N")
 ---@field cwd string Working directory this session was opened in
+---@field claude_session_id string|nil UUID of the Claude CLI session file, if known
 ---@field status "active"|"background"|"dead" Visibility/alive state
 ---@field created_at number Unix timestamp of creation
 
@@ -87,17 +95,53 @@ local function hide_buf_windows(bufnr)
   end
 end
 
---- Show a buffer in a new split window using the configured split settings.
----@param bufnr number
-local function show_in_split(bufnr)
+--- Find the best editor window to split from: non-floating, non-terminal.
+--- Falls back to current window if nothing better exists.
+---@return number winid
+local function find_editor_win()
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(w) then
+      local cfg = vim.api.nvim_win_get_config(w)
+      if not cfg.relative or cfg.relative == "" then
+        local wbuf = vim.api.nvim_win_get_buf(w)
+        if vim.bo[wbuf].buftype ~= "terminal" then
+          return w
+        end
+      end
+    end
+  end
+  return vim.api.nvim_get_current_win()
+end
+
+--- Open a split window from a proper editor window and show a buffer in it.
+--- When bufnr is nil a fresh empty buffer (enew) is used — suitable for new terminals.
+--- When bufnr is given the existing buffer (e.g. a running terminal) is displayed.
+---@param bufnr number|nil Existing buffer to show, or nil to create a fresh one
+---@return number winid The new split window ID
+local function open_in_split(bufnr)
   local side = _cfg.split_side or "right"
   local pct = _cfg.split_width_percentage or 0.30
   local width = math.floor(vim.o.columns * pct)
   local placement = (side == "right") and "botright" or "topleft"
+
+  -- Always split from a real editor window, never from a floating window or
+  -- a terminal buffer — otherwise window layout and <C-w> navigation break.
+  vim.api.nvim_set_current_win(find_editor_win())
+
   vim.cmd(placement .. " " .. width .. "vsplit")
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_height(win, vim.o.lines)
-  vim.api.nvim_win_set_buf(win, bufnr)
+
+  if bufnr then
+    vim.api.nvim_win_set_buf(win, bufnr)
+  else
+    -- Use enew so termopen gets a clean, unnamed buffer (same as native provider)
+    vim.api.nvim_win_call(win, function()
+      vim.cmd("enew")
+    end)
+  end
+
+  return win
 end
 
 --- Build claude command string and environment table.
@@ -122,21 +166,27 @@ local function build_cmd_env(resolved_args)
   return cmd, env
 end
 
---- Derive a display label from the resolved session args.
---- Looks up the preview text from the Claude session JSONL file.
+--- Extract the Claude CLI session UUID from resolved_args string.
+---@param resolved_args string|nil
+---@return string|nil
+local function extract_claude_session_id(resolved_args)
+  if not resolved_args or resolved_args == "" then
+    return nil
+  end
+  return resolved_args:match("--resume%s+(%S+)")
+end
+
+--- Derive a display label for a terminal session.
+--- For resume sessions, looks up the preview text from the Claude JSONL file.
 ---@param resolved_args string|nil
 ---@param cwd string
 ---@return string
 local function derive_label(resolved_args, cwd)
-  if not resolved_args or resolved_args == "" then
-    -- Count existing sessions for this cwd to give a number
+  local sid = extract_claude_session_id(resolved_args)
+
+  if not sid then
     local n = #sessions_for_cwd(cwd) + 1
     return "New Session " .. n
-  end
-
-  local sid = resolved_args:match("--resume%s+(%S+)")
-  if not sid then
-    return "New Session"
   end
 
   local ok, session_module = pcall(require, "claudecode.session")
@@ -147,10 +197,8 @@ local function derive_label(resolved_args, cwd)
         if se.id == sid then
           local preview = (se.preview and se.preview ~= "(no preview)") and se.preview or nil
           if preview then
-            -- Truncate long previews for display
             return #preview > 55 and (preview:sub(1, 52) .. "…") or preview
           end
-          -- Fallback: show date + short id
           if se.formatted then
             return se.formatted:sub(1, 40) .. "…"
           end
@@ -161,6 +209,65 @@ local function derive_label(resolved_args, cwd)
   end
 
   return "Session " .. sid:sub(1, 8) .. "…"
+end
+
+--- Core: spawn a terminal process in an already-open split window.
+--- The split must already be open and be the current window.
+---@param win number Window ID where the terminal should open
+---@param cmd string Claude CLI command string
+---@param env table Environment variables
+---@param label string Display label for the session
+---@param cwd string Working directory
+---@param claude_session_id string|nil Claude CLI session UUID (nil for fresh sessions)
+local function spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
+  local bufnr = vim.api.nvim_win_get_buf(win)
+  local session_id = gen_id()
+
+  ---@type ClaudeSessionEntry
+  local entry = {
+    id = session_id,
+    bufnr = bufnr,
+    jobid = -1,
+    label = label,
+    cwd = cwd,
+    claude_session_id = claude_session_id,
+    status = "active",
+    created_at = os.time(),
+  }
+
+  local jobid = vim.fn.termopen(cmd, {
+    env = env,
+    cwd = cwd,
+    on_exit = function(_, _, _)
+      vim.schedule(function()
+        local s = find_by_id(session_id)
+        if not s then
+          return
+        end
+        s.status = "dead"
+        if active_id == session_id then
+          active_id = nil
+        end
+        if _cfg.auto_close ~= false then
+          hide_buf_windows(s.bufnr)
+        end
+      end)
+    end,
+  })
+
+  if not jobid or jobid <= 0 then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    vim.notify("claudecode: failed to start claude process", vim.log.levels.ERROR)
+    return
+  end
+
+  -- termopen may have allocated a new buffer number; read it back
+  entry.bufnr = vim.api.nvim_win_get_buf(win)
+  entry.jobid = jobid
+  table.insert(sessions, entry)
+  active_id = session_id
+
+  vim.cmd("startinsert")
 end
 
 --- Hide the currently active session's window (keeps process running).
@@ -185,70 +292,24 @@ function M.setup(term_cfg)
 end
 
 --- Open a brand-new Claude session (shows the session-resume picker first).
---- After the user picks (fresh/resume/choose), a new terminal buffer is created
---- and becomes the active session. The previous active session is hidden.
+--- After the user picks (fresh/resume/choose), a new terminal is spawned and
+--- becomes the active session. The previous active session is hidden.
 function M.new_session()
   local ok, session_module = pcall(require, "claudecode.session")
   if not ok or not session_module.is_setup then
-    -- Session module unavailable or not set up — just open a fresh terminal
     session_module = nil
   end
 
   local cwd = vim.fn.getcwd()
 
   local function open_terminal(resolved_args)
+    local claude_session_id = extract_claude_session_id(resolved_args)
     local label = derive_label(resolved_args, cwd)
     local cmd, env = build_cmd_env(resolved_args)
 
     hide_active()
-
-    local bufnr = vim.api.nvim_create_buf(false, true)
-    show_in_split(bufnr)
-
-    local session_id = gen_id()
-
-    ---@type ClaudeSessionEntry
-    local entry = {
-      id = session_id,
-      bufnr = bufnr,
-      jobid = -1,
-      label = label,
-      cwd = cwd,
-      status = "active",
-      created_at = os.time(),
-    }
-
-    local jobid = vim.fn.termopen(cmd, {
-      env = env,
-      cwd = cwd,
-      on_exit = function(_, _, _)
-        vim.schedule(function()
-          local s = find_by_id(session_id)
-          if not s then
-            return
-          end
-          s.status = "dead"
-          if active_id == session_id then
-            active_id = nil
-          end
-          if _cfg.auto_close ~= false then
-            hide_buf_windows(s.bufnr)
-          end
-        end)
-      end,
-    })
-
-    if not jobid or jobid <= 0 then
-      pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-      vim.notify("claudecode: failed to start claude process", vim.log.levels.ERROR)
-      return
-    end
-
-    entry.jobid = jobid
-    table.insert(sessions, entry)
-    active_id = session_id
-
-    vim.cmd("startinsert")
+    local win = open_in_split(nil)
+    spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
   end
 
   if session_module then
@@ -263,7 +324,32 @@ function M.new_session()
   end
 end
 
---- Switch to a session by its internal ID.
+--- Resume a specific Claude CLI session by its UUID, bypassing the session picker.
+--- If a terminal for that session is already running, switch to it instead.
+---@param claude_session_id string The Claude CLI session UUID to resume
+---@param cwd string|nil Working directory (defaults to vim.fn.getcwd())
+function M.resume_session(claude_session_id, cwd)
+  cwd = cwd or vim.fn.getcwd()
+
+  -- If there's already a live terminal for this Claude session, just switch to it
+  for _, s in ipairs(sessions_for_cwd(cwd)) do
+    if s.claude_session_id == claude_session_id and s.status ~= "dead" then
+      M.switch_to(s.id)
+      return
+    end
+  end
+
+  -- No running terminal — open a new one resuming this session
+  local resolved_args = "--resume " .. claude_session_id
+  local label = derive_label(resolved_args, cwd)
+  local cmd, env = build_cmd_env(resolved_args)
+
+  hide_active()
+  local win = open_in_split(nil)
+  spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
+end
+
+--- Switch to a running session by its internal terminal ID.
 --- Hides the current active session and shows the target session's buffer.
 ---@param session_id string
 function M.switch_to(session_id)
@@ -281,20 +367,20 @@ function M.switch_to(session_id)
   if session_id == active_id then
     -- Already active — just ensure it's visible
     if not is_buf_visible(s.bufnr) then
-      show_in_split(s.bufnr)
+      open_in_split(s.bufnr)
       vim.cmd("startinsert")
     end
     return
   end
 
   hide_active()
-  show_in_split(s.bufnr)
+  open_in_split(s.bufnr)
   s.status = "active"
   active_id = session_id
   vim.cmd("startinsert")
 end
 
---- Kill (terminate and remove) a session by its internal ID.
+--- Kill (terminate and remove) a running session by its internal terminal ID.
 --- If it was the active session, switches to the most recent live session or does nothing.
 ---@param session_id string
 function M.kill_session(session_id)
@@ -306,11 +392,9 @@ function M.kill_session(session_id)
   local was_active = (active_id == session_id)
   local prev_cwd = s.cwd
 
-  -- Stop the process
   if s.jobid and s.jobid > 0 then
     pcall(vim.fn.jobstop, s.jobid)
   end
-  -- Remove the buffer
   if vim.api.nvim_buf_is_valid(s.bufnr) then
     hide_buf_windows(s.bufnr)
     pcall(vim.api.nvim_buf_delete, s.bufnr, { force = true })
@@ -320,7 +404,6 @@ function M.kill_session(session_id)
 
   if was_active then
     active_id = nil
-    -- Try to switch to the most-recent live session for same cwd
     local remaining = sessions_for_cwd(prev_cwd)
     for i = #remaining, 1, -1 do
       if remaining[i].status ~= "dead" and vim.api.nvim_buf_is_valid(remaining[i].bufnr) then
@@ -342,13 +425,12 @@ function M.toggle()
       if is_buf_visible(s.bufnr) then
         hide_active()
       else
-        show_in_split(s.bufnr)
+        open_in_split(s.bufnr)
         s.status = "active"
         vim.cmd("startinsert")
       end
       return
     end
-    -- Active session went dead
     active_id = nil
   end
 
@@ -357,12 +439,14 @@ function M.toggle()
   for i = #cwd_sessions, 1, -1 do
     local s = cwd_sessions[i]
     if s.status == "background" and vim.api.nvim_buf_is_valid(s.bufnr) then
-      M.switch_to(s.id)
+      open_in_split(s.bufnr)
+      s.status = "active"
+      active_id = s.id
+      vim.cmd("startinsert")
       return
     end
   end
 
-  -- No live session — open a new one
   M.new_session()
 end
 
@@ -395,12 +479,19 @@ function M.get_active()
 end
 
 --- Show the Snacks-based session quick switcher for the given cwd.
---- Displays all sessions with status indicators.
---- Keybindings inside the picker:
----   <CR>   — switch to selected session
----   dd     — kill selected session (normal mode)
----   <C-d>  — kill selected session (insert mode)
----   <C-n>  — open a new session and close the picker
+---
+--- Items are built by merging two sources:
+---   1. Running terminal sessions tracked by this module
+---   2. Historical Claude CLI session files for the project directory
+--- Sessions that appear in both show a live-status icon (● active, ○ background, ✗ dead).
+--- Sessions that only exist on disk (inactive) show a blank status icon and can be
+--- re-activated (equivalent to --resume) by pressing <CR>.
+---
+--- Keybindings:
+---   <CR>   — switch to / resume selected session
+---   dd     — kill selected session's terminal (running only; no-op for inactive)
+---   <C-d>  — same as dd in insert mode
+---   <C-n>  — open a new session (shows session-resume picker)
 ---@param cwd string|nil Defaults to vim.fn.getcwd()
 function M.show_picker(cwd)
   local ok, Snacks = pcall(require, "snacks")
@@ -411,33 +502,77 @@ function M.show_picker(cwd)
 
   cwd = cwd or vim.fn.getcwd()
 
-  --- Build the item list for the picker.
+  --- Build merged item list from running terminals + Claude CLI session files.
   ---@return table[]
   local function build_items()
-    local cwd_sessions = sessions_for_cwd(cwd)
     local items = {}
-    for _, s in ipairs(cwd_sessions) do
-      -- Status icon: ● active (visible window), ○ background (running), ✗ dead
-      local icon
-      if s.status == "active" then
-        icon = "● "
-      elseif s.status == "background" then
-        icon = "○ "
-      else
-        icon = "✗ "
+
+    -- Running terminal sessions indexed by their claude_session_id (for dedup below)
+    local running_by_claude_id = {}
+    for _, s in ipairs(sessions_for_cwd(cwd)) do
+      if s.claude_session_id then
+        running_by_claude_id[s.claude_session_id] = s
       end
-      table.insert(items, {
-        text = icon .. s.label,
-        session_id = s.id,
-        session_status = s.status,
-      })
+    end
+
+    -- 1. Running terminals with NO Claude session ID (fresh / anonymous starts)
+    for _, s in ipairs(sessions_for_cwd(cwd)) do
+      if not s.claude_session_id then
+        local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✗ ")
+        table.insert(items, {
+          text = icon .. s.label,
+          kind = "running",
+          terminal_id = s.id,
+          session_status = s.status,
+        })
+      end
+    end
+
+    -- 2. Claude CLI session files — running ones first, then inactive
+    local session_ok, session_module = pcall(require, "claudecode.session")
+    if session_ok then
+      local ok2, claude_sessions = pcall(session_module._list_sessions, cwd)
+      if ok2 and claude_sessions then
+        for _, cs in ipairs(claude_sessions) do
+          local running = running_by_claude_id[cs.id]
+          local icon, kind, status
+
+          if running then
+            -- Live terminal attached to this Claude session
+            if running.status == "active" then
+              icon = "● "
+            elseif running.status == "background" then
+              icon = "○ "
+            else
+              icon = "✗ "
+            end
+            kind = "running"
+            status = running.status
+          else
+            -- Historical session, no running terminal
+            icon = "  "
+            kind = "inactive"
+            status = "inactive"
+          end
+
+          local preview = (cs.preview and cs.preview ~= "(no preview)") and cs.preview or cs.id:sub(1, 8) .. "…"
+          local label = #preview > 55 and (preview:sub(1, 52) .. "…") or preview
+
+          table.insert(items, {
+            text = icon .. label,
+            kind = kind,
+            terminal_id = running and running.id or nil,
+            claude_session_id = cs.id,
+            session_status = status,
+          })
+        end
+      end
     end
 
     if #items == 0 then
-      -- Show a hint when there are no sessions yet
       table.insert(items, {
         text = "  No sessions — press <C-n> to open one",
-        session_id = nil,
+        kind = "hint",
       })
     end
 
@@ -450,18 +585,26 @@ function M.show_picker(cwd)
     format = "text",
     confirm = function(picker, item)
       picker:close()
-      if item and item.session_id then
-        M.switch_to(item.session_id)
+      if not item then
+        return
+      end
+      if item.kind == "running" and item.terminal_id then
+        M.switch_to(item.terminal_id)
+      elseif item.kind == "inactive" and item.claude_session_id then
+        -- Resume this historical session; opens a new terminal with --resume
+        vim.schedule(function()
+          M.resume_session(item.claude_session_id, cwd)
+        end)
       end
     end,
     actions = {
       kill_session = function(picker)
         local item = picker:current()
-        if not item or not item.session_id then
+        if not item or item.kind ~= "running" or not item.terminal_id then
+          -- Inactive sessions have no running terminal to kill
           return
         end
-        M.kill_session(item.session_id)
-        -- Reopen the picker with the updated list after a short delay
+        M.kill_session(item.terminal_id)
         picker:close()
         vim.schedule(function()
           M.show_picker(cwd)
@@ -477,13 +620,13 @@ function M.show_picker(cwd)
     win = {
       input = {
         keys = {
-          ["<C-d>"] = { "kill_session", desc = "Kill session", mode = { "i", "n" } },
+          ["<C-d>"] = { "kill_session", desc = "Kill running session", mode = { "i", "n" } },
           ["<C-n>"] = { "new_session", desc = "New session", mode = { "i", "n" } },
         },
       },
       list = {
         keys = {
-          ["dd"] = { "kill_session", desc = "Kill session", mode = "n" },
+          ["dd"] = { "kill_session", desc = "Kill running session", mode = "n" },
           ["n"] = { "new_session", desc = "New session", mode = "n" },
         },
       },

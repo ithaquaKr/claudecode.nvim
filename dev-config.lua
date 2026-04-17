@@ -27,6 +27,11 @@ return {
       ft = { "NvimTree", "neo-tree", "oil", "minifiles", "netrw" },
     },
 
+    -- Multi-session management
+    { "<leader>an", "<cmd>ClaudeCodeSessionNew<cr>", desc = "New Claude session" },
+    { "<leader>a<Tab>", "<cmd>ClaudeCodeSessionSwitch<cr>", desc = "Switch Claude session" },
+    { "<leader>ak", "<cmd>ClaudeCodeSessionKill<cr>", desc = "Kill active Claude session" },
+
     -- Development helpers
     { "<leader>ao", "<cmd>ClaudeCodeOpen<cr>", desc = "Open Claude" },
     { "<leader>aq", "<cmd>ClaudeCodeClose<cr>", desc = "Close Claude" },
