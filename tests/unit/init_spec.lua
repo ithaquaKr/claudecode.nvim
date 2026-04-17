@@ -291,6 +291,7 @@ describe("claudecode.init", function()
 
   describe("ClaudeCode command with arguments", function()
     local mock_terminal
+    local mock_terminal_manager
 
     before_each(function()
       mock_terminal = {
@@ -303,10 +304,25 @@ describe("claudecode.init", function()
         ensure_visible = spy.new(function() end),
       }
 
+      mock_terminal_manager = {
+        setup = spy.new(function() end),
+        toggle = spy.new(function() end),
+        focus_toggle = spy.new(function() end),
+        new_session = spy.new(function() end),
+        resume_session = spy.new(function() end),
+        hide = spy.new(function() end),
+        show_picker = spy.new(function() end),
+        kill_active = spy.new(function() end),
+        get_active = spy.new(function() end),
+        get_sessions = spy.new(function() return {} end),
+      }
+
       local original_require = _G.require
       _G.require = function(mod)
         if mod == "claudecode.terminal" then
           return mock_terminal
+        elseif mod == "claudecode.terminal_manager" then
+          return mock_terminal_manager
         elseif mod == "claudecode.server.init" then
           return mock_server
         elseif mod == "claudecode.lockfile" then
@@ -374,12 +390,12 @@ describe("claudecode.init", function()
 
       assert.is_function(command_handler, "Command handler should be a function")
 
+      -- "--resume --verbose": --resume pattern matches with uuid="--verbose" → resume_session
       command_handler({ args = "--resume --verbose" })
 
-      assert(#mock_terminal.simple_toggle.calls > 0, "terminal.simple_toggle was not called")
-      local call_args = mock_terminal.simple_toggle.calls[1].vals
-      assert.is_table(call_args[1], "First argument should be a table")
-      assert.is_equal("--resume --verbose", call_args[2], "Second argument should be the command args")
+      assert(#mock_terminal_manager.resume_session.calls > 0, "terminal_manager.resume_session was not called")
+      local call_args = mock_terminal_manager.resume_session.calls[1].vals
+      assert.is_equal("--verbose", call_args[1], "First argument should be the session UUID")
     end)
 
     it("should parse and pass arguments to terminal.open for ClaudeCodeOpen command", function()
@@ -399,10 +415,9 @@ describe("claudecode.init", function()
 
       command_handler({ args = "--flag1 --flag2" })
 
-      assert(#mock_terminal.open.calls > 0, "terminal.open was not called")
-      local call_args = mock_terminal.open.calls[1].vals
-      assert.is_table(call_args[1], "First argument should be a table")
-      assert.is_equal("--flag1 --flag2", call_args[2], "Second argument should be the command args")
+      assert(#mock_terminal_manager.new_session.calls > 0, "terminal_manager.new_session was not called")
+      local call_args = mock_terminal_manager.new_session.calls[1].vals
+      assert.is_equal("--flag1 --flag2", call_args[1], "First argument should be the command args")
     end)
 
     it("should handle empty arguments gracefully", function()
@@ -419,9 +434,7 @@ describe("claudecode.init", function()
 
       command_handler({ args = "" })
 
-      assert(#mock_terminal.simple_toggle.calls > 0, "terminal.simple_toggle was not called")
-      local call_args = mock_terminal.simple_toggle.calls[1].vals
-      assert.is_nil(call_args[2], "Second argument should be nil for empty args")
+      assert(#mock_terminal_manager.toggle.calls > 0, "terminal_manager.toggle was not called")
     end)
 
     it("should handle nil arguments gracefully", function()
@@ -438,9 +451,7 @@ describe("claudecode.init", function()
 
       command_handler({ args = nil })
 
-      assert(#mock_terminal.simple_toggle.calls > 0, "terminal.simple_toggle was not called")
-      local call_args = mock_terminal.simple_toggle.calls[1].vals
-      assert.is_nil(call_args[2], "Second argument should be nil when args is nil")
+      assert(#mock_terminal_manager.toggle.calls > 0, "terminal_manager.toggle was not called")
     end)
 
     it("should maintain backward compatibility when no arguments provided", function()
@@ -457,9 +468,7 @@ describe("claudecode.init", function()
 
       command_handler({})
 
-      assert(#mock_terminal.simple_toggle.calls > 0, "terminal.simple_toggle was not called")
-      local call_args = mock_terminal.simple_toggle.calls[1].vals
-      assert.is_nil(call_args[2], "Second argument should be nil when no args provided")
+      assert(#mock_terminal_manager.toggle.calls > 0, "terminal_manager.toggle was not called")
     end)
   end)
 

@@ -1008,72 +1008,98 @@ function M._create_commands()
     desc = "Add specified file or directory to Claude Code context with optional line range",
   })
 
-  local terminal_ok, terminal = pcall(require, "claudecode.terminal")
-  if terminal_ok then
-    vim.api.nvim_create_user_command("ClaudeCode", function(opts)
-      local current_mode = vim.fn.mode()
-      if current_mode == "v" or current_mode == "V" or current_mode == "\22" then
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
-      end
-      local cmd_args = opts.args and opts.args ~= "" and opts.args or nil
-      terminal.simple_toggle({}, cmd_args)
-    end, {
-      nargs = "*",
-      desc = "Toggle the Claude Code terminal window (simple show/hide) with optional arguments",
-    })
-
-    vim.api.nvim_create_user_command("ClaudeCodeFocus", function(opts)
-      local current_mode = vim.fn.mode()
-      if current_mode == "v" or current_mode == "V" or current_mode == "\22" then
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
-      end
-      local cmd_args = opts.args and opts.args ~= "" and opts.args or nil
-      terminal.focus_toggle({}, cmd_args)
-    end, {
-      nargs = "*",
-      desc = "Smart focus/toggle Claude Code terminal (switches to terminal if not focused, hides if focused)",
-    })
-
-    vim.api.nvim_create_user_command("ClaudeCodeOpen", function(opts)
-      local cmd_args = opts.args and opts.args ~= "" and opts.args or nil
-      terminal.open({}, cmd_args)
-    end, {
-      nargs = "*",
-      desc = "Open the Claude Code terminal window with optional arguments",
-    })
-
-    vim.api.nvim_create_user_command("ClaudeCodeClose", function()
-      terminal.close()
-    end, {
-      desc = "Close the Claude Code terminal window",
-    })
-  else
-    logger.error(
-      "init",
-      "Terminal module not found. Terminal commands (ClaudeCode, ClaudeCodeOpen, ClaudeCodeClose) not registered."
-    )
-  end
-
-  -- Multi-session commands (backed by terminal_manager)
+  -- terminal_manager is the single source of truth for all Claude Code terminals.
+  -- Every command — toggle, focus, open, close, session management — goes through it.
+  -- terminal.lua is kept as a fallback only when terminal_manager cannot load.
   local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
   if tm_ok then
+    local function escape_visual()
+      local m = vim.fn.mode()
+      if m == "v" or m == "V" or m == "\22" then
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+      end
+    end
+
+    -- Toggle: show/hide active session, or open new (with session-resume picker)
+    vim.api.nvim_create_user_command("ClaudeCode", function(opts)
+      escape_visual()
+      local args = opts.args ~= "" and opts.args or nil
+      if args then
+        local uuid = args:match("--resume%s+(%S+)")
+        if uuid then
+          tm.resume_session(uuid)
+        else
+          tm.new_session(args)
+        end
+      else
+        tm.toggle()
+      end
+    end, { nargs = "*", desc = "Toggle Claude Code terminal (accepts optional arguments)" })
+
+    -- Focus-toggle: switch to terminal if not focused, hide if focused
+    vim.api.nvim_create_user_command("ClaudeCodeFocus", function(opts)
+      escape_visual()
+      local args = opts.args ~= "" and opts.args or nil
+      if args then
+        tm.new_session(args)
+      else
+        tm.focus_toggle()
+      end
+    end, { nargs = "*", desc = "Smart focus/toggle Claude Code terminal" })
+
+    -- Open: always spawn a new session (or resume via args)
+    vim.api.nvim_create_user_command("ClaudeCodeOpen", function(opts)
+      local args = opts.args ~= "" and opts.args or nil
+      tm.new_session(args)
+    end, { nargs = "*", desc = "Open a new Claude Code session (accepts optional arguments)" })
+
+    -- Close: hide the active session window without killing the process
+    vim.api.nvim_create_user_command("ClaudeCodeClose", function()
+      tm.hide()
+    end, { desc = "Hide the active Claude Code terminal window" })
+
+    -- Session management
     vim.api.nvim_create_user_command("ClaudeCodeSessionNew", function()
       tm.new_session()
-    end, {
-      desc = "Open a new Claude Code session (shows session-resume picker)",
-    })
+    end, { desc = "Open a new Claude Code session (shows session-resume picker)" })
 
     vim.api.nvim_create_user_command("ClaudeCodeSessionSwitch", function()
       tm.show_picker()
-    end, {
-      desc = "Show Claude Code session quick-switcher (Snacks picker)",
-    })
+    end, { desc = "Show Claude Code session quick-switcher" })
 
     vim.api.nvim_create_user_command("ClaudeCodeSessionKill", function()
       tm.kill_active()
-    end, {
-      desc = "Kill the currently active Claude Code managed session",
-    })
+    end, { desc = "Kill the currently active Claude Code session" })
+  else
+    -- Fallback: legacy single-session terminal
+    local terminal_ok, terminal = pcall(require, "claudecode.terminal")
+    if terminal_ok then
+      vim.api.nvim_create_user_command("ClaudeCode", function(opts)
+        local m = vim.fn.mode()
+        if m == "v" or m == "V" or m == "\22" then
+          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+        end
+        terminal.simple_toggle({}, opts.args ~= "" and opts.args or nil)
+      end, { nargs = "*", desc = "Toggle Claude Code terminal" })
+
+      vim.api.nvim_create_user_command("ClaudeCodeFocus", function(opts)
+        local m = vim.fn.mode()
+        if m == "v" or m == "V" or m == "\22" then
+          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+        end
+        terminal.focus_toggle({}, opts.args ~= "" and opts.args or nil)
+      end, { nargs = "*", desc = "Smart focus/toggle Claude Code terminal" })
+
+      vim.api.nvim_create_user_command("ClaudeCodeOpen", function(opts)
+        terminal.open({}, opts.args ~= "" and opts.args or nil)
+      end, { nargs = "*", desc = "Open Claude Code terminal" })
+
+      vim.api.nvim_create_user_command("ClaudeCodeClose", function()
+        terminal.close()
+      end, { desc = "Close Claude Code terminal" })
+    else
+      logger.error("init", "No terminal backend found. ClaudeCode commands not registered.")
+    end
   end
 
   -- Diff management commands

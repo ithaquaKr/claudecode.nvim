@@ -15,12 +15,13 @@ local M = {}
 ---@class ClaudeSessionEntry
 ---@field id string Unique internal ID for this Neovim terminal instance
 ---@field bufnr number Neovim buffer number
----@field jobid number Terminal job ID (from vim.fn.termopen)
+---@field jobid number Terminal job ID (from vim.fn.termopen), -1 for snacks sessions
 ---@field label string Display label (Claude session preview or "New Session N")
 ---@field cwd string Working directory this session was opened in
 ---@field claude_session_id string|nil UUID of the Claude CLI session file, if known
 ---@field status "active"|"background"|"dead" Visibility/alive state
 ---@field created_at number Unix timestamp of creation
+---@field _snacks_term table|nil Snacks terminal instance, when using snacks provider
 
 ---@type ClaudeSessionEntry[]
 local sessions = {}
@@ -145,14 +146,92 @@ local function ensure_editor_win()
 end
 
 --- Spawn a new Claude terminal session.
---- Mirrors native.lua's open_terminal: splits from the user's current window,
---- calls termopen in the new split, sets bufhidden=hide, then enters insert mode.
+--- Uses Snacks.terminal.open when available (creates a proper side panel that
+--- navigation plugins like vim-tmux-navigator understand). Falls back to a plain
+--- vsplit + termopen when snacks is not installed.
 ---@param cmd_string string Full Claude CLI command string
 ---@param env table Environment variables
 ---@param label string Display label
 ---@param cwd string Working directory
 ---@param claude_session_id string|nil Claude CLI session UUID
 local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
+  local session_id = gen_id()
+  ---@type ClaudeSessionEntry
+  local entry = {
+    id = session_id,
+    bufnr = -1,
+    jobid = -1,
+    label = label,
+    cwd = cwd,
+    claude_session_id = claude_session_id,
+    status = "active",
+    created_at = os.time(),
+    _snacks_term = nil,
+  }
+
+  local snacks_ok, Snacks = pcall(require, "snacks")
+  if snacks_ok and Snacks and Snacks.terminal then
+    -- Use Snacks.terminal.open so the window is a proper Snacks side panel —
+    -- this matches what the old provider created and is what navigation plugins expect.
+    local side = _cfg.split_side or "right"
+    local opts = {
+      env = env,
+      cwd = cwd,
+      start_insert = true,
+      auto_insert = true,
+      auto_close = false, -- we handle cleanup ourselves
+      win = vim.tbl_deep_extend("force", {
+        position = side,
+        width = _cfg.split_width_percentage or 0.30,
+        height = 0,
+        relative = "editor",
+      }, (_cfg.snacks_win_opts or {})),
+    }
+
+    local term_instance = Snacks.terminal.open(cmd_string, opts)
+    if not term_instance or not term_instance:buf_valid() then
+      vim.notify("claudecode: failed to open snacks terminal", vim.log.levels.ERROR)
+      return
+    end
+
+    entry.bufnr = term_instance.buf
+    entry._snacks_term = term_instance
+
+    -- Mark dead on process exit
+    term_instance:on("TermClose", function()
+      vim.schedule(function()
+        local s = find_by_id(session_id)
+        if not s then
+          return
+        end
+        s.status = "dead"
+        if active_id == session_id then
+          active_id = nil
+        end
+        if _cfg.auto_close ~= false then
+          pcall(function()
+            term_instance:close({ buf = true })
+          end)
+        end
+      end)
+    end, { buf = true })
+
+    term_instance:on("BufWipeout", function()
+      local s = find_by_id(session_id)
+      if s then
+        s.status = "dead"
+        if active_id == session_id then
+          active_id = nil
+        end
+      end
+    end, { buf = true })
+
+    table.insert(sessions, entry)
+    active_id = session_id
+    return
+  end
+
+  -- Native vsplit fallback (mirrors native.lua's open_terminal)
   ensure_editor_win()
   local original_win = vim.api.nvim_get_current_win()
   local placement, width = split_params()
@@ -168,19 +247,6 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
   local cmd_arg = cmd_string:find(" ", 1, true)
     and vim.split(cmd_string, " ", { plain = true, trimempty = false })
     or { cmd_string }
-
-  local session_id = gen_id()
-  ---@type ClaudeSessionEntry
-  local entry = {
-    id = session_id,
-    bufnr = -1,
-    jobid = -1,
-    label = label,
-    cwd = cwd,
-    claude_session_id = claude_session_id,
-    status = "active",
-    created_at = os.time(),
-  }
 
   local jobid = vim.fn.termopen(cmd_arg, {
     env = env,
@@ -208,7 +274,7 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
     return
   end
 
-  -- Read buffer after termopen — matches native.lua (termopen may allocate a new buf)
+  -- Read buffer after termopen — termopen may allocate a new buf (mirrors native.lua)
   entry.bufnr = vim.api.nvim_get_current_buf()
   entry.jobid = jobid
   vim.bo[entry.bufnr].bufhidden = "hide"
@@ -222,12 +288,22 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
   end)
 end
 
---- Show an existing session buffer in a new split.
---- Mirrors native.lua's show_hidden_terminal: splits from the user's current window,
---- sets the existing buffer, does NOT enter insert mode (terminal keeps its own state).
+--- Show an existing session buffer.
+--- For snacks sessions: uses the snacks term instance to show/focus.
+--- For native sessions: splits from the user's current window and sets the buffer.
+--- Does NOT enter insert mode — callers handle startinsert after this.
 ---@param s ClaudeSessionEntry
 ---@return number new_win
 local function show_existing_terminal(s)
+  if s._snacks_term then
+    if not s._snacks_term:win_valid() then
+      s._snacks_term:toggle() -- show the hidden window
+    end
+    s._snacks_term:focus()
+    return s._snacks_term.win or vim.api.nvim_get_current_win()
+  end
+
+  -- Native vsplit fallback
   ensure_editor_win()
   local placement, width = split_params()
 
@@ -259,34 +335,35 @@ local function extract_text_from_content(content)
 end
 
 --- Read a Claude CLI session JSONL file and return formatted lines for preview.
---- Shows the conversation exchanges (user + assistant turns only) as markdown.
---- Reads only the tail of large files for performance.
+--- Shows conversation history with a metadata header and clean turn formatting.
 ---@param session_file string Absolute path to the .jsonl file
+---@param session_status string|nil "active"|"background"|"dead"|"inactive"
 ---@return string[]
-local function parse_session_for_preview(session_file)
+local function parse_session_for_preview(session_file, session_status)
   local file = io.open(session_file, "r")
   if not file then
-    return { "(could not open session file)" }
+    return { "  (could not open session file)" }
   end
 
-  -- Collect all lines first; for large files we only care about the tail
+  -- Tail-read for performance on large sessions
   local raw_lines = {}
   for line in file:lines() do
     table.insert(raw_lines, line)
   end
   file:close()
 
-  -- Process only the last 300 lines to keep parsing fast
-  local start_idx = math.max(1, #raw_lines - 300)
+  local stat = vim.loop.fs_stat(session_file)
+  local date_str = stat and os.date("%Y-%m-%d  %H:%M", stat.mtime.sec) or ""
+
+  local start_idx = math.max(1, #raw_lines - 400)
   local turns = {}
 
   for i = start_idx, #raw_lines do
     local ok, entry = pcall(vim.json.decode, raw_lines[i])
     if ok and type(entry) == "table" then
-      local role = entry.type -- "user" or "assistant"
+      local role = entry.type
       if (role == "user" or role == "assistant") and type(entry.message) == "table" then
         local text = extract_text_from_content(entry.message.content)
-        -- Strip internal command/tool XML noise Claude CLI injects
         text = text:gsub("<command%-message>.-</command%-message>", "")
         text = text:gsub("<command%-name>.-</command%-name>", "")
         text = text:match("^%s*(.-)%s*$") or text
@@ -297,29 +374,53 @@ local function parse_session_for_preview(session_file)
     end
   end
 
+  local lines = {}
+
+  -- Header bar
+  local status_icon = ""
+  if session_status == "active" then
+    status_icon = "●  LIVE  "
+  elseif session_status == "background" then
+    status_icon = "○  BG    "
+  end
+  table.insert(lines, status_icon .. date_str .. "  (" .. #turns .. " turns)")
+  table.insert(lines, string.rep("─", 48))
+  table.insert(lines, "")
+
   if #turns == 0 then
-    return { "(no conversation content found)" }
+    table.insert(lines, "  (no conversation content found)")
+    return lines
   end
 
-  -- Format the last 20 turns as markdown
-  local lines = {}
-  local show_from = math.max(1, #turns - 20)
+  -- Show the last 12 turns (6 exchanges)
+  local show_from = math.max(1, #turns - 11)
   if show_from > 1 then
-    table.insert(lines, string.format("*… %d earlier exchanges not shown …*", show_from - 1))
+    table.insert(lines, "  … " .. (show_from - 1) .. " earlier turns …")
     table.insert(lines, "")
   end
 
   for i = show_from, #turns do
     local turn = turns[i]
-    local header = turn.role == "user" and "## 👤 User" or "## 🤖 Claude"
-    table.insert(lines, header)
-    table.insert(lines, "")
-    for _, l in ipairs(vim.split(turn.text, "\n", { plain = true })) do
-      table.insert(lines, l)
+    if turn.role == "user" then
+      table.insert(lines, "  YOU")
+      table.insert(lines, "  " .. string.rep("·", 20))
+      local text = #turn.text > 400 and (turn.text:sub(1, 397) .. "…") or turn.text
+      for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
+        table.insert(lines, "  " .. l)
+      end
+    else
+      table.insert(lines, "  CLAUDE")
+      table.insert(lines, "  " .. string.rep("·", 20))
+      local text = #turn.text > 600 and (turn.text:sub(1, 597) .. "…") or turn.text
+      for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
+        table.insert(lines, "  " .. l)
+      end
     end
     table.insert(lines, "")
-    table.insert(lines, "---")
-    table.insert(lines, "")
+    if i < #turns then
+      table.insert(lines, "  " .. string.rep("─", 44))
+      table.insert(lines, "")
+    end
   end
 
   return lines
@@ -393,6 +494,30 @@ local function derive_label(resolved_args, cwd)
 end
 
 
+--- Delete the Claude CLI session JSONL file from disk.
+---@param claude_session_id string Session UUID
+---@param cwd string Working directory the session belongs to
+---@return boolean deleted
+local function delete_claude_session_file(claude_session_id, cwd)
+  if not claude_session_id or claude_session_id == "" then
+    return false
+  end
+  local ok, session_module = pcall(require, "claudecode.session")
+  if not ok then
+    return false
+  end
+  local ok_c, canonical = pcall(session_module._canonical_cwd, cwd)
+  if not ok_c then
+    return false
+  end
+  local ok_h, hash = pcall(session_module._hash_cwd, canonical)
+  if not ok_h then
+    return false
+  end
+  local path = vim.fn.expand("~/.claude/projects/") .. hash .. "/" .. claude_session_id .. ".jsonl"
+  return vim.loop.fs_unlink(path) == true
+end
+
 --- Hide the currently active session's window (keeps process running).
 local function hide_active()
   if not active_id then
@@ -400,7 +525,13 @@ local function hide_active()
   end
   local s = find_by_id(active_id)
   if s and vim.api.nvim_buf_is_valid(s.bufnr) then
-    hide_buf_windows(s.bufnr)
+    if s._snacks_term then
+      if s._snacks_term:win_valid() then
+        s._snacks_term:toggle() -- hides the snacks panel
+      end
+    else
+      hide_buf_windows(s.bufnr)
+    end
     if s.status == "active" then
       s.status = "background"
     end
@@ -414,42 +545,17 @@ function M.setup(term_cfg)
   _cfg = term_cfg or {}
 end
 
---- Open a brand-new Claude session (shows the session-resume picker first).
---- After the user picks (fresh/resume/choose), a new terminal is spawned and
---- becomes the active session. The previous active session is hidden.
----@param forced_args string|nil If provided, skip the session picker and open with these CLI args directly.
+--- Open a brand-new Claude session directly — no session picker.
+--- Session history browsing is done exclusively via show_picker().
+--- Hides the current active session and spawns a fresh terminal.
+---@param forced_args string|nil Optional extra CLI args (e.g. "--verbose"); use resume_session() for --resume.
 function M.new_session(forced_args)
   local cwd = vim.fn.getcwd()
-
-  local function open_terminal(resolved_args)
-    local claude_session_id = extract_claude_session_id(resolved_args)
-    local label = derive_label(resolved_args, cwd)
-    local cmd, env = build_cmd_env(resolved_args)
-
-    hide_active()
-    open_new_terminal(cmd, env, label, cwd, claude_session_id)
-  end
-
-  if forced_args then
-    open_terminal(forced_args)
-    return
-  end
-
-  local ok, session_module = pcall(require, "claudecode.session")
-  if not ok or not session_module.is_setup then
-    session_module = nil
-  end
-
-  if session_module then
-    session_module.resolve_args(cwd, function(resolved_args)
-      if resolved_args == false then
-        return -- user cancelled picker
-      end
-      open_terminal(resolved_args)
-    end)
-  else
-    open_terminal(nil)
-  end
+  local claude_session_id = extract_claude_session_id(forced_args)
+  local label = derive_label(forced_args, cwd)
+  local cmd, env = build_cmd_env(forced_args)
+  hide_active()
+  open_new_terminal(cmd, env, label, cwd, claude_session_id)
 end
 
 --- Resume a specific Claude CLI session by its UUID, bypassing the session picker.
@@ -523,12 +629,18 @@ function M.kill_session(session_id)
   local was_active = (active_id == session_id)
   local prev_cwd = s.cwd
 
-  if s.jobid and s.jobid > 0 then
-    pcall(vim.fn.jobstop, s.jobid)
-  end
-  if vim.api.nvim_buf_is_valid(s.bufnr) then
-    hide_buf_windows(s.bufnr)
-    pcall(vim.api.nvim_buf_delete, s.bufnr, { force = true })
+  if s._snacks_term then
+    pcall(function()
+      s._snacks_term:close({ buf = true })
+    end)
+  else
+    if s.jobid and s.jobid > 0 then
+      pcall(vim.fn.jobstop, s.jobid)
+    end
+    if vim.api.nvim_buf_is_valid(s.bufnr) then
+      hide_buf_windows(s.bufnr)
+      pcall(vim.api.nvim_buf_delete, s.bufnr, { force = true })
+    end
   end
 
   table.remove(sessions, idx)
@@ -546,7 +658,9 @@ function M.kill_session(session_id)
 end
 
 --- Toggle the active session: hide if visible, show if hidden.
---- If no sessions exist for the current cwd, opens a new one.
+--- If no sessions exist for the current cwd, spawns a fresh one immediately —
+--- no session picker, matching the old single-session toggle behaviour exactly.
+--- The session picker is only shown by new_session() (ClaudeCodeSessionNew).
 function M.toggle()
   local cwd = vim.fn.getcwd()
 
@@ -582,7 +696,10 @@ function M.toggle()
     end
   end
 
-  M.new_session()
+  -- No active or background session — open a fresh one directly, no picker
+  local cmd, env = build_cmd_env(nil)
+  local label = derive_label(nil, cwd)
+  open_new_terminal(cmd, env, label, cwd, nil)
 end
 
 --- Hide the active session window without killing the process.
@@ -624,7 +741,11 @@ function M.focus_toggle()
     end
     active_id = nil
   end
-  M.new_session()
+  -- No active session — open fresh directly, no picker
+  local cwd = vim.fn.getcwd()
+  local cmd, env = build_cmd_env(nil)
+  local label = derive_label(nil, cwd)
+  open_new_terminal(cmd, env, label, cwd, nil)
 end
 
 --- Kill the currently active session (if any).
@@ -775,15 +896,35 @@ function M.show_picker(cwd)
     title = "Claude Code Sessions",
     items = build_items(),
     format = "text",
-    -- Show conversation content from the Claude CLI session JSONL file
     preview = function(ctx)
       local item = ctx.item
-      if not item or not item.session_file then
+      if not item then
         return false
       end
-      local lines = parse_session_for_preview(item.session_file)
+
+      local preview_lines
+
+      if item.session_file then
+        preview_lines = parse_session_for_preview(item.session_file, item.session_status)
+      elseif item.kind == "running" and item.terminal_id then
+        -- Running session with no JSONL yet (fresh, never saved a turn)
+        local s = find_by_id(item.terminal_id)
+        preview_lines = {
+          (item.session_status == "active" and "●  LIVE  " or "○  BG    ")
+            .. os.date("%Y-%m-%d  %H:%M", s and s.created_at or os.time()),
+          string.rep("─", 48),
+          "",
+          "  Started: " .. (s and os.date("%H:%M:%S", s.created_at) or "unknown"),
+          "  CWD:     " .. (s and s.cwd or cwd),
+          "",
+          "  (conversation history not available yet)",
+        }
+      else
+        return false
+      end
+
       vim.bo[ctx.buf].modifiable = true
-      vim.api.nvim_buf_set_lines(ctx.buf, 0, -1, false, lines)
+      vim.api.nvim_buf_set_lines(ctx.buf, 0, -1, false, preview_lines)
       vim.bo[ctx.buf].filetype = "markdown"
       vim.bo[ctx.buf].modifiable = false
       return true
@@ -793,7 +934,6 @@ function M.show_picker(cwd)
       if not item then
         return
       end
-      -- Schedule both paths so the picker fully closes before we manipulate windows
       if item.kind == "running" and item.terminal_id then
         vim.schedule(function()
           M.switch_to(item.terminal_id)
@@ -805,12 +945,18 @@ function M.show_picker(cwd)
       end
     end,
     actions = {
-      kill_session = function(picker)
+      -- Delete: kill terminal if running + remove JSONL from disk
+      delete_session = function(picker)
         local item = picker:current()
-        if not item or item.kind ~= "running" or not item.terminal_id then
+        if not item or item.kind == "hint" then
           return
         end
-        M.kill_session(item.terminal_id)
+        if item.kind == "running" and item.terminal_id then
+          M.kill_session(item.terminal_id)
+        end
+        if item.claude_session_id then
+          delete_claude_session_file(item.claude_session_id, cwd)
+        end
         picker:close()
         vim.schedule(function()
           M.show_picker(cwd)
@@ -826,13 +972,13 @@ function M.show_picker(cwd)
     win = {
       input = {
         keys = {
-          ["<C-d>"] = { "kill_session", desc = "Kill running session", mode = { "i", "n" } },
+          ["<C-d>"] = { "delete_session", desc = "Delete session", mode = { "i", "n" } },
           ["<C-n>"] = { "new_session", desc = "New session", mode = { "i", "n" } },
         },
       },
       list = {
         keys = {
-          ["dd"] = { "kill_session", desc = "Kill running session", mode = "n" },
+          ["dd"] = { "delete_session", desc = "Delete session", mode = "n" },
           ["n"] = { "new_session", desc = "New session", mode = "n" },
         },
       },
