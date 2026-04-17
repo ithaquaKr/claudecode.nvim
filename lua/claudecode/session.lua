@@ -26,13 +26,13 @@ function M._canonical_cwd(raw)
 end
 
 ---Hash a canonical cwd to match Claude CLI's project directory naming.
----Claude replaces all '/' with '-' in the path.
+---Claude replaces all '/' and '.' with '-' in the path.
 ---Note: this has a theoretical collision risk (e.g. /foo/bar vs /foo-bar)
 ---but is intentional — it must match Claude CLI's own convention.
 ---@param canonical string Canonical cwd from _canonical_cwd()
 ---@return string hash Directory name used by Claude CLI
 function M._hash_cwd(canonical)
-  return canonical:gsub("/", "-")
+  return canonical:gsub("[/.]", "-")
 end
 
 ---Parse the last user message preview from a Claude session JSONL file.

@@ -203,6 +203,12 @@ Configure the plugin with the detected path:
 - `:ClaudeCodeDiffAccept` - Accept diff changes
 - `:ClaudeCodeDiffDeny` - Reject diff changes
 
+### Multi-Session Commands
+
+- `:ClaudeCodeSessionNew` - Open a new Claude session (shows session-resume picker)
+- `:ClaudeCodeSessionSwitch` - Show session quick-switcher (Snacks picker); lists all running and historical sessions for the current project
+- `:ClaudeCodeSessionKill` - Kill the currently active managed session
+
 ## Working with Diffs
 
 When Claude proposes changes, the plugin opens a native Neovim diff view:
