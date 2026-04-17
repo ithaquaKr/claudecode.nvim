@@ -963,6 +963,8 @@ function M._create_commands()
 
     local args = vim.split(opts.args, "%s+")
     local file_path = args[1]
+    -- Strip virtual filesystem protocols (e.g. oil:// from oil.nvim)
+    file_path = file_path:gsub("^oil://", "")
     local start_line = args[2] and tonumber(args[2]) or nil
     local end_line = args[3] and tonumber(args[3]) or nil
 

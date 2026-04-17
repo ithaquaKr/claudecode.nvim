@@ -16,10 +16,10 @@ return {
     { "<leader>am", "<cmd>ClaudeCodeSelectModel<cr>", desc = "Select Claude model" },
 
     -- Context sending
-    { "<leader>as", "<cmd>ClaudeCodeAdd %<cr>", mode = "n", desc = "Add current buffer" },
+    { "<leader>ab", "<cmd>ClaudeCodeAdd %<cr>", mode = "n", desc = "Add current buffer" },
     { "<leader>as", "<cmd>ClaudeCodeSend<cr>", mode = "v", desc = "Send to Claude" },
     {
-      "<leader>as",
+      "<leader>ab",
       "<cmd>ClaudeCodeTreeAdd<cr>",
       desc = "Add file from tree",
       ft = { "NvimTree", "neo-tree", "oil", "minifiles", "netrw" },

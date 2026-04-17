@@ -377,14 +377,19 @@ local function parse_session_for_preview(session_file, session_status)
   local lines = {}
 
   -- Header bar
-  local status_icon = ""
+  local badge
   if session_status == "active" then
-    status_icon = "●  LIVE  "
+    badge = "● LIVE"
   elseif session_status == "background" then
-    status_icon = "○  BG    "
+    badge = "○ BG"
+  elseif session_status == "dead" then
+    badge = "✕ DEAD"
+  else
+    badge = "  HISTORY"
   end
-  table.insert(lines, status_icon .. date_str .. "  (" .. #turns .. " turns)")
-  table.insert(lines, string.rep("─", 48))
+  local turn_word = #turns == 1 and "turn" or "turns"
+  table.insert(lines, "  " .. badge .. "  ·  " .. date_str .. "  ·  " .. #turns .. " " .. turn_word)
+  table.insert(lines, "  " .. string.rep("═", 50))
   table.insert(lines, "")
 
   if #turns == 0 then
@@ -395,32 +400,32 @@ local function parse_session_for_preview(session_file, session_status)
   -- Show the last 12 turns (6 exchanges)
   local show_from = math.max(1, #turns - 11)
   if show_from > 1 then
-    table.insert(lines, "  … " .. (show_from - 1) .. " earlier turns …")
+    table.insert(lines, "  ‹ " .. (show_from - 1) .. " earlier turns ›")
     table.insert(lines, "")
+  end
+
+  local function add_content_lines(text, max_chars)
+    for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
+      if #l > max_chars then
+        table.insert(lines, "  │ " .. l:sub(1, max_chars - 1) .. "…")
+      else
+        table.insert(lines, "  │ " .. l)
+      end
+    end
   end
 
   for i = show_from, #turns do
     local turn = turns[i]
     if turn.role == "user" then
-      table.insert(lines, "  YOU")
-      table.insert(lines, "  " .. string.rep("·", 20))
+      table.insert(lines, "  ▸ you " .. string.rep("─", 44))
       local text = #turn.text > 400 and (turn.text:sub(1, 397) .. "…") or turn.text
-      for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
-        table.insert(lines, "  " .. l)
-      end
+      add_content_lines(text, 58)
     else
-      table.insert(lines, "  CLAUDE")
-      table.insert(lines, "  " .. string.rep("·", 20))
+      table.insert(lines, "  ▸ claude " .. string.rep("─", 41))
       local text = #turn.text > 600 and (turn.text:sub(1, 597) .. "…") or turn.text
-      for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
-        table.insert(lines, "  " .. l)
-      end
+      add_content_lines(text, 58)
     end
     table.insert(lines, "")
-    if i < #turns then
-      table.insert(lines, "  " .. string.rep("─", 44))
-      table.insert(lines, "")
-    end
   end
 
   return lines
@@ -922,7 +927,7 @@ function M.show_picker(cwd)
     -- 1. Running terminals with NO Claude session ID (fresh / anonymous starts)
     for _, s in ipairs(sessions_for_cwd(cwd)) do
       if not s.claude_session_id then
-        local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✗ ")
+        local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✕ ")
         table.insert(items, {
           text = icon .. s.label,
           kind = "running",
@@ -947,12 +952,12 @@ function M.show_picker(cwd)
             elseif running.status == "background" then
               icon = "○ "
             else
-              icon = "✗ "
+              icon = "✕ "
             end
             kind = "running"
             status = running.status
           else
-            icon = "  "
+            icon = "· "
             kind = "inactive"
             status = "inactive"
           end
@@ -975,7 +980,7 @@ function M.show_picker(cwd)
 
     if #items == 0 then
       table.insert(items, {
-        text = "  No sessions — press <C-n> to open one",
+        text = "· No sessions — press <C-n> to open one",
         kind = "hint",
         session_file = nil,
       })
@@ -1001,15 +1006,16 @@ function M.show_picker(cwd)
       elseif item.kind == "running" and item.terminal_id then
         -- Running session with no JSONL yet (fresh, never saved a turn)
         local s = find_by_id(item.terminal_id)
+        local status_badge = item.session_status == "active" and "● LIVE" or "○ BG"
         preview_lines = {
-          (item.session_status == "active" and "●  LIVE  " or "○  BG    ")
-            .. os.date("%Y-%m-%d  %H:%M", s and s.created_at or os.time()),
-          string.rep("─", 48),
+          "  " .. status_badge .. "  ·  " .. os.date("%Y-%m-%d  %H:%M", s and s.created_at or os.time()),
+          "  " .. string.rep("═", 50),
           "",
-          "  Started: " .. (s and os.date("%H:%M:%S", s.created_at) or "unknown"),
-          "  CWD:     " .. (s and s.cwd or cwd),
+          "  ▸ session info " .. string.rep("─", 35),
+          "  │ Started:  " .. (s and os.date("%H:%M:%S", s.created_at) or "unknown"),
+          "  │ CWD:      " .. (s and s.cwd or cwd),
           "",
-          "  (conversation history not available yet)",
+          "  No conversation history yet.",
         }
       else
         return false
