@@ -375,7 +375,7 @@ describe("claudecode.init", function()
       assert.is_true(command_found, "ClaudeCodeOpen command was not registered")
     end)
 
-    it("should parse and pass arguments to terminal.toggle for ClaudeCode command", function()
+    it("should parse and pass arguments to terminal_manager.new_session for ClaudeCode command", function()
       local claudecode = require("claudecode")
       claudecode.setup({ auto_start = false })
 
@@ -390,12 +390,11 @@ describe("claudecode.init", function()
 
       assert.is_function(command_handler, "Command handler should be a function")
 
-      -- "--resume --verbose": --resume pattern matches with uuid="--verbose" → resume_session
-      command_handler({ args = "--resume --verbose" })
+      command_handler({ args = "--verbose" })
 
-      assert(#mock_terminal_manager.resume_session.calls > 0, "terminal_manager.resume_session was not called")
-      local call_args = mock_terminal_manager.resume_session.calls[1].vals
-      assert.is_equal("--verbose", call_args[1], "First argument should be the session UUID")
+      assert(#mock_terminal_manager.new_session.calls > 0, "terminal_manager.new_session was not called")
+      local call_args = mock_terminal_manager.new_session.calls[1].vals
+      assert.is_equal("--verbose", call_args[1], "First argument should be the extra args")
     end)
 
     it("should parse and pass arguments to terminal.open for ClaudeCodeOpen command", function()

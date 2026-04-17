@@ -91,6 +91,14 @@ describe("ClaudeCodeAdd command", function()
           end,
           simple_toggle = spy.new(function() end),
         }
+      elseif mod == "claudecode.terminal_manager" then
+        return {
+          setup = spy.new(function() end),
+          toggle = spy.new(function() end),
+          ensure_visible = spy.new(function() end),
+          get_active = spy.new(function() return nil end),
+          get_sessions = spy.new(function() return {} end),
+        }
       elseif mod == "claudecode.visual_commands" then
         return {
           create_visual_command_wrapper = function(normal_handler, visual_handler)
@@ -113,6 +121,7 @@ describe("ClaudeCodeAdd command", function()
     package.loaded["claudecode.diff"] = nil
     package.loaded["claudecode.visual_commands"] = nil
     package.loaded["claudecode.terminal"] = nil
+    package.loaded["claudecode.terminal_manager"] = nil
 
     claudecode = require("claudecode")
 

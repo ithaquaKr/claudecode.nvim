@@ -548,14 +548,13 @@ end
 --- Open a brand-new Claude session directly — no session picker.
 --- Session history browsing is done exclusively via show_picker().
 --- Hides the current active session and spawns a fresh terminal.
----@param forced_args string|nil Optional extra CLI args (e.g. "--verbose"); use resume_session() for --resume.
+---@param forced_args string|nil Optional extra CLI args (e.g. "--verbose")
 function M.new_session(forced_args)
   local cwd = vim.fn.getcwd()
-  local claude_session_id = extract_claude_session_id(forced_args)
   local label = derive_label(forced_args, cwd)
   local cmd, env = build_cmd_env(forced_args)
   hide_active()
-  open_new_terminal(cmd, env, label, cwd, claude_session_id)
+  open_new_terminal(cmd, env, label, cwd, nil)
 end
 
 --- Resume a specific Claude CLI session by its UUID, bypassing the session picker.
@@ -700,6 +699,99 @@ function M.toggle()
   local cmd, env = build_cmd_env(nil)
   local label = derive_label(nil, cwd)
   open_new_terminal(cmd, env, label, cwd, nil)
+end
+
+--- Open / show-and-focus the active session. Never hides it.
+--- Equivalent to "open terminal and enter insert mode":
+---   • visible + focused  → do nothing (already there)
+---   • visible + unfocused → focus it
+---   • hidden             → show and focus
+---   • no session         → create one
+--- Used by focus_after_send=true.
+function M.open()
+  if active_id then
+    local s = find_by_id(active_id)
+    if s and s.status ~= "dead" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      if is_buf_visible(s.bufnr) then
+        -- Already visible — just focus (enter insert mode)
+        show_existing_terminal(s) -- calls :focus() for snacks
+        vim.schedule(function()
+          vim.cmd("startinsert")
+        end)
+      else
+        -- Hidden — show and focus
+        show_existing_terminal(s)
+        s.status = "active"
+        vim.schedule(function()
+          vim.cmd("startinsert")
+        end)
+      end
+      return
+    end
+    active_id = nil
+  end
+
+  -- Try to restore a background session with focus
+  local cwd = vim.fn.getcwd()
+  for _, s in ipairs(sessions_for_cwd(cwd)) do
+    if s.status == "background" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      show_existing_terminal(s)
+      s.status = "active"
+      active_id = s.id
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
+      return
+    end
+  end
+
+  -- No session — create one
+  local cmd, env = build_cmd_env(nil)
+  local label = derive_label(nil, cwd)
+  open_new_terminal(cmd, env, label, cwd, nil)
+end
+
+--- Show the active session without stealing focus or entering insert mode.
+--- If no session is active, opens a new one (background, no focus steal).
+--- Used by focus_after_send=false and similar "keep editing" paths.
+function M.ensure_visible()
+  if active_id then
+    local s = find_by_id(active_id)
+    if s and s.status ~= "dead" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      if not is_buf_visible(s.bufnr) then
+        -- Show without focus: open the split, then return to the original window
+        local orig = vim.api.nvim_get_current_win()
+        show_existing_terminal(s)
+        s.status = "active"
+        vim.api.nvim_set_current_win(orig)
+      end
+      return
+    end
+    active_id = nil
+  end
+
+  -- Try to restore a background session without stealing focus
+  local cwd = vim.fn.getcwd()
+  for _, s in ipairs(sessions_for_cwd(cwd)) do
+    if s.status == "background" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      local orig = vim.api.nvim_get_current_win()
+      show_existing_terminal(s)
+      s.status = "active"
+      active_id = s.id
+      vim.api.nvim_set_current_win(orig)
+      return
+    end
+  end
+
+  -- No session — create one but stay focused on the current window
+  local orig = vim.api.nvim_get_current_win()
+  local cmd, env = build_cmd_env(nil)
+  local label = derive_label(nil, cwd)
+  open_new_terminal(cmd, env, label, cwd, nil)
+  -- open_new_terminal enters insert mode via vim.schedule; override to stay on orig
+  vim.schedule(function()
+    vim.api.nvim_set_current_win(orig)
+  end)
 end
 
 --- Hide the active session window without killing the process.

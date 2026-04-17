@@ -9,11 +9,21 @@ describe("focus_after_send behavior", function()
   local mock_logger
   local mock_server_facade
 
+  local mock_terminal_manager
+
   local function setup_mocks(focus_after_send)
     mock_terminal = {
       setup = function() end,
       open = spy.new(function() end),
       ensure_visible = spy.new(function() end),
+    }
+
+    mock_terminal_manager = {
+      setup = spy.new(function() end),
+      open = spy.new(function() end),
+      toggle = spy.new(function() end),
+      ensure_visible = spy.new(function() end),
+      get_active = spy.new(function() return nil end),
     }
 
     mock_logger = {
@@ -61,6 +71,8 @@ describe("focus_after_send behavior", function()
         return { setup = function() end }
       elseif mod == "claudecode.terminal" then
         return mock_terminal
+      elseif mod == "claudecode.terminal_manager" then
+        return mock_terminal_manager
       elseif mod == "claudecode.server.init" then
         return {
           get_status = function()
@@ -80,6 +92,7 @@ describe("focus_after_send behavior", function()
     package.loaded["claudecode.logger"] = nil
     package.loaded["claudecode.diff"] = nil
     package.loaded["claudecode.terminal"] = nil
+    package.loaded["claudecode.terminal_manager"] = nil
     package.loaded["claudecode.server.init"] = nil
   end
 
@@ -104,9 +117,9 @@ describe("focus_after_send behavior", function()
     assert.is_true(ok)
     assert.is_nil(err)
 
-    -- Assert focus behavior
-    assert.spy(mock_terminal.open).was_called()
-    assert.spy(mock_terminal.ensure_visible).was_not_called()
+    -- terminal_manager.open() used for focus_after_send=true (show+focus, never hides)
+    assert.spy(mock_terminal_manager.open).was_called()
+    assert.spy(mock_terminal_manager.ensure_visible).was_not_called()
   end)
 
   it("only ensures visibility when disabled (default)", function()
@@ -124,7 +137,8 @@ describe("focus_after_send behavior", function()
     assert.is_true(ok)
     assert.is_nil(err)
 
-    assert.spy(mock_terminal.ensure_visible).was_called()
-    assert.spy(mock_terminal.open).was_not_called()
+    -- terminal_manager.ensure_visible() used for focus_after_send=false
+    assert.spy(mock_terminal_manager.ensure_visible).was_called()
+    assert.spy(mock_terminal_manager.toggle).was_not_called()
   end)
 end)

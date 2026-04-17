@@ -256,6 +256,19 @@ function M._ensure_terminal_visible_if_connected()
     return false
   end
 
+  local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
+  if tm_ok and tm then
+    local s = tm.get_active()
+    if not s or s.status == "dead" or not vim.api.nvim_buf_is_valid(s.bufnr) then
+      return false
+    end
+    local bufinfo = vim.fn.getbufinfo(s.bufnr)[1]
+    if not (bufinfo and #bufinfo.windows > 0) then
+      tm.ensure_visible()
+    end
+    return true
+  end
+
   local terminal = require("claudecode.terminal")
   local active_bufnr = terminal.get_active_terminal_bufnr and terminal.get_active_terminal_bufnr()
 
@@ -264,9 +277,7 @@ function M._ensure_terminal_visible_if_connected()
   end
 
   local bufinfo = vim.fn.getbufinfo(active_bufnr)[1]
-  local is_visible = bufinfo and #bufinfo.windows > 0
-
-  if not is_visible then
+  if not (bufinfo and #bufinfo.windows > 0) then
     terminal.ensure_visible()
   end
 
@@ -293,12 +304,20 @@ function M.send_at_mention(file_path, start_line, end_line, context)
     -- Claude is connected, send immediately and ensure terminal is visible
     local success, error_msg = M._broadcast_at_mention(file_path, start_line, end_line)
     if success then
-      local terminal = require("claudecode.terminal")
-      if M.state.config and M.state.config.focus_after_send then
-        -- Open focuses the terminal without toggling/hiding if already focused
-        terminal.open()
+      local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
+      if tm_ok and tm then
+        if M.state.config and M.state.config.focus_after_send then
+          tm.open() -- show and focus, never hides
+        else
+          tm.ensure_visible() -- show without stealing focus
+        end
       else
-        terminal.ensure_visible()
+        local terminal = require("claudecode.terminal")
+        if M.state.config and M.state.config.focus_after_send then
+          terminal.open()
+        else
+          terminal.ensure_visible()
+        end
       end
     end
     return success, error_msg
@@ -306,9 +325,13 @@ function M.send_at_mention(file_path, start_line, end_line, context)
     -- Claude not connected, queue the mention and launch terminal
     queue_mention(file_path, start_line, end_line)
 
-    -- Launch terminal with Claude Code
-    local terminal = require("claudecode.terminal")
-    terminal.open()
+    local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
+    if tm_ok and tm then
+      tm.toggle()
+    else
+      local terminal = require("claudecode.terminal")
+      terminal.open()
+    end
 
     logger.debug(context, "Queued @ mention and launched Claude Code: " .. file_path)
 
@@ -1020,17 +1043,12 @@ function M._create_commands()
       end
     end
 
-    -- Toggle: show/hide active session, or open new (with session-resume picker)
+    -- Toggle: show/hide active session, or open new
     vim.api.nvim_create_user_command("ClaudeCode", function(opts)
       escape_visual()
       local args = opts.args ~= "" and opts.args or nil
       if args then
-        local uuid = args:match("--resume%s+(%S+)")
-        if uuid then
-          tm.resume_session(uuid)
-        else
-          tm.new_session(args)
-        end
+        tm.new_session(args)
       else
         tm.toggle()
       end

@@ -138,23 +138,40 @@ local function handler(params)
       vim.api.nvim_set_current_win(target_win)
     end
   else
-    -- Fallback: Create a new window if no suitable window found
-    -- Try to move to a better position
-    vim.cmd("wincmd t") -- Go to top-left
-    vim.cmd("wincmd l") -- Move right (to middle if layout is left|middle|right)
-
-    -- If we're still in a special window, create a new split
-    local buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
-    local buftype = vim.api.nvim_buf_get_option(buf, "buftype")
-
-    if buftype == "terminal" or buftype == "nofile" then
-      vim.cmd("vsplit")
+    -- No suitable editor window — create a new one.
+    -- Prefer splitting from a non-terminal, non-floating window so we don't
+    -- accidentally duplicate a terminal buffer (which would look like a new terminal).
+    local base_win = nil
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      local cfg = vim.api.nvim_win_get_config(win)
+      if not cfg.relative or cfg.relative == "" then
+        local bt = vim.bo[vim.api.nvim_win_get_buf(win)].buftype
+        if bt ~= "terminal" then
+          base_win = win
+          break
+        end
+        base_win = base_win or win -- terminal as last resort
+      end
     end
+
+    local restore_win = vim.api.nvim_get_current_win()
+    if base_win and base_win ~= restore_win then
+      vim.api.nvim_set_current_win(base_win)
+    end
+
+    -- vnew creates a fresh empty buffer in a new split — safe even when splitting
+    -- from a terminal window (unlike vsplit which would copy the terminal buffer).
+    vim.cmd("vnew")
+    target_win = vim.api.nvim_get_current_win()
 
     if preview then
       vim.cmd("pedit " .. vim.fn.fnameescape(file_path))
     else
       vim.cmd("edit " .. vim.fn.fnameescape(file_path))
+    end
+
+    if not make_frontmost then
+      vim.api.nvim_set_current_win(restore_win)
     end
   end
 
