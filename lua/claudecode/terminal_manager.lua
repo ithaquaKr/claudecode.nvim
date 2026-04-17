@@ -96,21 +96,31 @@ local function hide_buf_windows(bufnr)
 end
 
 --- Find the best editor window to split from: non-floating, non-terminal.
---- Falls back to current window if nothing better exists.
+--- Prefers the currently focused window so the split opens where the user expects.
+--- Only falls back to searching when the current window is floating (e.g. a picker)
+--- or is itself a terminal buffer.
 ---@return number winid
 local function find_editor_win()
+  local cur = vim.api.nvim_get_current_win()
+  if vim.api.nvim_win_is_valid(cur) then
+    local cfg = vim.api.nvim_win_get_config(cur)
+    if not cfg.relative or cfg.relative == "" then
+      if vim.bo[vim.api.nvim_win_get_buf(cur)].buftype ~= "terminal" then
+        return cur
+      end
+    end
+  end
   for _, w in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(w) then
       local cfg = vim.api.nvim_win_get_config(w)
       if not cfg.relative or cfg.relative == "" then
-        local wbuf = vim.api.nvim_win_get_buf(w)
-        if vim.bo[wbuf].buftype ~= "terminal" then
+        if vim.bo[vim.api.nvim_win_get_buf(w)].buftype ~= "terminal" then
           return w
         end
       end
     end
   end
-  return vim.api.nvim_get_current_win()
+  return cur
 end
 
 --- Open a split window from a proper editor window and show a buffer in it.
@@ -354,6 +364,7 @@ local function spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
   -- termopen may have allocated a new buffer number; read it back
   entry.bufnr = vim.api.nvim_win_get_buf(win)
   entry.jobid = jobid
+  vim.bo[entry.bufnr].bufhidden = "hide"
   table.insert(sessions, entry)
   active_id = session_id
 
@@ -387,12 +398,8 @@ end
 --- Open a brand-new Claude session (shows the session-resume picker first).
 --- After the user picks (fresh/resume/choose), a new terminal is spawned and
 --- becomes the active session. The previous active session is hidden.
-function M.new_session()
-  local ok, session_module = pcall(require, "claudecode.session")
-  if not ok or not session_module.is_setup then
-    session_module = nil
-  end
-
+---@param forced_args string|nil If provided, skip the session picker and open with these CLI args directly.
+function M.new_session(forced_args)
   local cwd = vim.fn.getcwd()
 
   local function open_terminal(resolved_args)
@@ -403,6 +410,16 @@ function M.new_session()
     hide_active()
     local win = open_in_split(nil)
     spawn_terminal(win, cmd, env, label, cwd, claude_session_id)
+  end
+
+  if forced_args then
+    open_terminal(forced_args)
+    return
+  end
+
+  local ok, session_module = pcall(require, "claudecode.session")
+  if not ok or not session_module.is_setup then
+    session_module = nil
   end
 
   if session_module then
@@ -549,6 +566,45 @@ function M.toggle()
     end
   end
 
+  M.new_session()
+end
+
+--- Hide the active session window without killing the process.
+--- No-op if nothing is active or the window is already hidden.
+function M.hide()
+  if not active_id then
+    return
+  end
+  local s = find_by_id(active_id)
+  if s and is_buf_visible(s.bufnr) then
+    hide_active()
+  end
+end
+
+--- Focus-toggle: if the active session is focused, hide it; if visible but
+--- unfocused, move focus to it; if hidden, show it; if nothing active, open new.
+function M.focus_toggle()
+  if active_id then
+    local s = find_by_id(active_id)
+    if s and s.status ~= "dead" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      if is_buf_visible(s.bufnr) then
+        local cur_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+        if cur_buf == s.bufnr then
+          hide_active()
+        else
+          local info = vim.fn.getbufinfo(s.bufnr)
+          if info and #info > 0 and #info[1].windows > 0 then
+            vim.api.nvim_set_current_win(info[1].windows[1])
+          end
+        end
+      else
+        open_in_split(s.bufnr)
+        s.status = "active"
+      end
+      return
+    end
+    active_id = nil
+  end
   M.new_session()
 end
 
