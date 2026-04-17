@@ -373,6 +373,16 @@ function M.setup(opts)
     logger.warn("init", "Failed to load claudecode.session module for setup.")
   end
 
+  local tm_ok, terminal_manager = pcall(require, "claudecode.terminal_manager")
+  if tm_ok and type(terminal_manager.setup) == "function" then
+    -- Pass the fully-resolved terminal config (same source as terminal.lua uses)
+    local tm_cfg = vim.tbl_deep_extend("force", M.state.config.terminal or {}, {
+      terminal_cmd = M.state.config.terminal_cmd,
+      env = M.state.config.env or {},
+    })
+    terminal_manager.setup(tm_cfg)
+  end
+
   local diff = require("claudecode.diff")
   diff.setup(M.state.config)
 
@@ -1042,6 +1052,28 @@ function M._create_commands()
       "init",
       "Terminal module not found. Terminal commands (ClaudeCode, ClaudeCodeOpen, ClaudeCodeClose) not registered."
     )
+  end
+
+  -- Multi-session commands (backed by terminal_manager)
+  local tm_cmd_ok, tm = pcall(require, "claudecode.terminal_manager")
+  if tm_cmd_ok then
+    vim.api.nvim_create_user_command("ClaudeCodeSessionNew", function()
+      tm.new_session()
+    end, {
+      desc = "Open a new Claude Code session (shows session-resume picker)",
+    })
+
+    vim.api.nvim_create_user_command("ClaudeCodeSessionSwitch", function()
+      tm.show_picker()
+    end, {
+      desc = "Show Claude Code session quick-switcher (Snacks picker)",
+    })
+
+    vim.api.nvim_create_user_command("ClaudeCodeSessionKill", function()
+      tm.kill_active()
+    end, {
+      desc = "Kill the currently active Claude Code managed session",
+    })
   end
 
   -- Diff management commands
