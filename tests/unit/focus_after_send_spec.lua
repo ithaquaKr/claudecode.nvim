@@ -38,6 +38,9 @@ describe("focus_after_send behavior", function()
       broadcast = spy.new(function()
         return true
       end),
+      send_to_active = spy.new(function()
+        return true
+      end),
     }
 
     local mock_config = {

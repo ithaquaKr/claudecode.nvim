@@ -14,12 +14,14 @@ local M = {}
 ---@field auth_token string|nil The authentication token for validating connections
 ---@field handlers table Message handlers by method name
 ---@field ping_timer table|nil Timer for sending pings
+---@field active_client_id string|nil Client ID of the currently active Claude session
 M.state = {
   server = nil,
   port = nil,
   auth_token = nil,
   handlers = {},
   ping_timer = nil,
+  active_client_id = nil,
 }
 
 ---Initialize the WebSocket server
@@ -58,13 +60,19 @@ function M.start(config, auth_token)
         logger.debug("server", "WebSocket client connected (no auth):", client.id)
       end
 
-      -- Notify main module about new connection for queue processing
-      local main_module = require("claudecode")
-      if main_module.process_mention_queue then
-        vim.schedule(function()
+      vim.schedule(function()
+        -- Notify terminal_manager so it can associate this client with a session
+        local ok, tm = pcall(require, "claudecode.terminal_manager")
+        if ok and tm.on_client_connect then
+          tm.on_client_connect(client.id)
+        end
+
+        -- Notify main module about new connection for queue processing
+        local main_module = require("claudecode")
+        if main_module.process_mention_queue then
           main_module.process_mention_queue(true)
-        end)
-      end
+        end
+      end)
     end,
     on_disconnect = function(client, code, reason)
       logger.debug(
@@ -76,6 +84,9 @@ function M.start(config, auth_token)
         ", reason:",
         (reason or "N/A") .. ")"
       )
+      if M.state.active_client_id == client.id then
+        M.state.active_client_id = nil
+      end
     end,
     on_error = function(error_msg)
       logger.error("server", "WebSocket server error:", error_msg)
@@ -370,6 +381,38 @@ function M.send_response(client, id, result, error_data)
 
   local json_response = vim.json.encode(response)
   tcp_server.send_to_client(M.state.server, client.id, json_response)
+  return true
+end
+
+---Set the active client ID (the Claude session the user is currently working with).
+---@param client_id string|nil
+function M.set_active_client(client_id)
+  M.state.active_client_id = client_id
+end
+
+---Send a message to the active client only.
+---Falls back to broadcast when no active client is tracked (e.g. single-session setups).
+---@param method string The method name
+---@param params table|nil The parameters to send
+---@return boolean success
+function M.send_to_active(method, params)
+  if not M.state.server then
+    return false
+  end
+
+  local message = {
+    jsonrpc = "2.0",
+    method = method,
+    params = params or vim.empty_dict(),
+  }
+  local json_message = vim.json.encode(message)
+
+  if M.state.active_client_id then
+    return tcp_server.send_to_client(M.state.server, M.state.active_client_id, json_message) ~= nil
+  end
+
+  -- No active client tracked — fall back to broadcast (single-session or legacy path)
+  tcp_server.broadcast(M.state.server, json_message)
   return true
 end
 

@@ -22,6 +22,7 @@ local M = {}
 ---@field status "active"|"background"|"dead" Visibility/alive state
 ---@field created_at number Unix timestamp of creation
 ---@field _snacks_term table|nil Snacks terminal instance, when using snacks provider
+---@field client_id string|nil WebSocket client ID of the connected Claude CLI process
 
 ---@type ClaudeSessionEntry[]
 local sessions = {}
@@ -167,6 +168,7 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
     status = "active",
     created_at = os.time(),
     _snacks_term = nil,
+    client_id = nil,
   }
 
   local snacks_ok, Snacks = pcall(require, "snacks")
@@ -550,6 +552,47 @@ function M.setup(term_cfg)
   _cfg = term_cfg or {}
 end
 
+--- Called by the WebSocket server when a new Claude CLI client connects.
+--- Assigns the client to the oldest unassigned live session, then tells the
+--- server which client is "active" if the session is the current active one.
+---@param client_id string WebSocket client ID
+function M.on_client_connect(client_id)
+  -- Find the oldest live session without a client_id yet (FIFO assignment)
+  local oldest = nil
+  for _, s in ipairs(sessions) do
+    if s.status ~= "dead" and not s.client_id then
+      if not oldest or s.created_at < oldest.created_at then
+        oldest = s
+      end
+    end
+  end
+
+  if not oldest then
+    return
+  end
+
+  oldest.client_id = client_id
+
+  -- If this session is the active one, update the server's active client
+  if oldest.id == active_id then
+    local ok, server = pcall(require, "claudecode.server.init")
+    if ok then
+      server.set_active_client(client_id)
+    end
+  end
+end
+
+--- Tell the server which client belongs to the given session (if known).
+---@param session ClaudeSessionEntry
+local function sync_active_client(session)
+  if session and session.client_id then
+    local ok, server = pcall(require, "claudecode.server.init")
+    if ok then
+      server.set_active_client(session.client_id)
+    end
+  end
+end
+
 --- Open a brand-new Claude session directly — no session picker.
 --- Session history browsing is done exclusively via show_picker().
 --- Hides the current active session and spawns a fresh terminal.
@@ -615,6 +658,7 @@ function M.switch_to(session_id)
   show_existing_terminal(s)
   s.status = "active"
   active_id = session_id
+  sync_active_client(s)
   -- Defer startinsert so any typeahead from picker/<CR> is flushed first
   vim.schedule(function()
     vim.cmd("startinsert")
@@ -717,14 +761,13 @@ function M.open()
   if active_id then
     local s = find_by_id(active_id)
     if s and s.status ~= "dead" and vim.api.nvim_buf_is_valid(s.bufnr) then
+      sync_active_client(s)
       if is_buf_visible(s.bufnr) then
-        -- Already visible — just focus (enter insert mode)
-        show_existing_terminal(s) -- calls :focus() for snacks
+        show_existing_terminal(s)
         vim.schedule(function()
           vim.cmd("startinsert")
         end)
       else
-        -- Hidden — show and focus
         show_existing_terminal(s)
         s.status = "active"
         vim.schedule(function()
@@ -743,6 +786,7 @@ function M.open()
       show_existing_terminal(s)
       s.status = "active"
       active_id = s.id
+      sync_active_client(s)
       vim.schedule(function()
         vim.cmd("startinsert")
       end)

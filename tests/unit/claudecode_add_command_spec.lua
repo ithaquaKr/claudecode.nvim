@@ -12,6 +12,9 @@ describe("ClaudeCodeAdd command", function()
       broadcast = spy.new(function()
         return true
       end),
+      send_to_active = spy.new(function()
+        return true
+      end),
     }
 
     mock_logger = {
@@ -201,20 +204,20 @@ describe("ClaudeCodeAdd command", function()
         command_handler({ args = "~/test.lua" })
 
         assert.spy(vim.fn.expand).was_called_with("~/test.lua")
-        assert.spy(mock_server.broadcast).was_called()
+        assert.spy(mock_server.send_to_active).was_called()
       end)
 
       it("should expand relative paths", function()
         command_handler({ args = "./relative.lua" })
 
         assert.spy(vim.fn.expand).was_called_with("./relative.lua")
-        assert.spy(mock_server.broadcast).was_called()
+        assert.spy(mock_server.send_to_active).was_called()
       end)
 
       it("should handle absolute paths", function()
         command_handler({ args = "/existing/file.lua" })
 
-        assert.spy(mock_server.broadcast).was_called()
+        assert.spy(mock_server.send_to_active).was_called()
       end)
     end)
 
@@ -222,7 +225,7 @@ describe("ClaudeCodeAdd command", function()
       it("should broadcast existing file successfully", function()
         command_handler({ args = "/existing/file.lua" })
 
-        assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+        assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
           filePath = "/existing/file.lua",
           lineStart = nil,
           lineEnd = nil,
@@ -233,7 +236,7 @@ describe("ClaudeCodeAdd command", function()
       it("should broadcast existing directory successfully", function()
         command_handler({ args = "/existing/dir" })
 
-        assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+        assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
           filePath = "/existing/dir/",
           lineStart = nil,
           lineEnd = nil,
@@ -242,7 +245,7 @@ describe("ClaudeCodeAdd command", function()
       end)
 
       it("should handle broadcast failure", function()
-        mock_server.broadcast = spy.new(function()
+        mock_server.send_to_active = spy.new(function()
           return false
         end)
 
@@ -261,14 +264,14 @@ describe("ClaudeCodeAdd command", function()
 
         command_handler({ args = "/current/dir/src/test.lua" })
 
-        assert.spy(mock_server.broadcast).was_called_with("at_mentioned", match.is_table())
+        assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", match.is_table())
         assert.spy(mock_logger.debug).was_called()
       end)
 
       it("should add trailing slash for directories", function()
         command_handler({ args = "/existing/dir" })
 
-        assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+        assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
           filePath = "/existing/dir/",
           lineStart = nil,
           lineEnd = nil,
@@ -280,7 +283,7 @@ describe("ClaudeCodeAdd command", function()
       it("should convert 1-indexed user input to 0-indexed for Claude", function()
         command_handler({ args = "/existing/file.lua 1 3" })
 
-        assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+        assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
           filePath = "/existing/file.lua",
           lineStart = 0,
           lineEnd = 2,
@@ -293,7 +296,7 @@ describe("ClaudeCodeAdd command", function()
         it("should parse single file path correctly", function()
           command_handler({ args = "/existing/file.lua" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = nil,
             lineEnd = nil,
@@ -303,7 +306,7 @@ describe("ClaudeCodeAdd command", function()
         it("should parse file path with start line", function()
           command_handler({ args = "/existing/file.lua 50" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = 49,
             lineEnd = nil,
@@ -313,7 +316,7 @@ describe("ClaudeCodeAdd command", function()
         it("should parse file path with start and end lines", function()
           command_handler({ args = "/existing/file.lua 50 100" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = 49,
             lineEnd = 99,
@@ -326,49 +329,49 @@ describe("ClaudeCodeAdd command", function()
           command_handler({ args = "/existing/file.lua abc" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error on invalid end line number", function()
           command_handler({ args = "/existing/file.lua 50 xyz" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error on negative start line", function()
           command_handler({ args = "/existing/file.lua -5" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error on negative end line", function()
           command_handler({ args = "/existing/file.lua 10 -20" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error on zero line numbers", function()
           command_handler({ args = "/existing/file.lua 0 10" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error when start line > end line", function()
           command_handler({ args = "/existing/file.lua 100 50" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
 
         it("should error on too many arguments", function()
           command_handler({ args = "/existing/file.lua 10 20 30" })
 
           assert.spy(mock_logger.error).was_called()
-          assert.spy(mock_server.broadcast).was_not_called()
+          assert.spy(mock_server.send_to_active).was_not_called()
         end)
       end)
 
@@ -376,7 +379,7 @@ describe("ClaudeCodeAdd command", function()
         it("should ignore line numbers for directories and warn", function()
           command_handler({ args = "/existing/dir 50 100" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/dir/",
             lineStart = nil,
             lineEnd = nil,
@@ -389,7 +392,7 @@ describe("ClaudeCodeAdd command", function()
         it("should handle start line equal to end line", function()
           command_handler({ args = "/existing/file.lua 50 50" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = 49,
             lineEnd = 49, -- 50 - 1 (converted to 0-indexed)
@@ -399,7 +402,7 @@ describe("ClaudeCodeAdd command", function()
         it("should handle large line numbers", function()
           command_handler({ args = "/existing/file.lua 1000 2000" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = 999,
             lineEnd = 1999,
@@ -409,7 +412,7 @@ describe("ClaudeCodeAdd command", function()
         it("should handle single line specification", function()
           command_handler({ args = "/existing/file.lua 42" })
 
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/existing/file.lua",
             lineStart = 41,
             lineEnd = nil,
@@ -422,7 +425,7 @@ describe("ClaudeCodeAdd command", function()
           command_handler({ args = "~/test.lua 10 20" })
 
           assert.spy(vim.fn.expand).was_called_with("~/test.lua")
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "/home/user/test.lua",
             lineStart = 9,
             lineEnd = 19,
@@ -433,7 +436,7 @@ describe("ClaudeCodeAdd command", function()
           command_handler({ args = "./relative.lua 5" })
 
           assert.spy(vim.fn.expand).was_called_with("./relative.lua")
-          assert.spy(mock_server.broadcast).was_called_with("at_mentioned", {
+          assert.spy(mock_server.send_to_active).was_called_with("at_mentioned", {
             filePath = "relative.lua",
             lineStart = 4,
             lineEnd = nil,
@@ -465,7 +468,7 @@ describe("ClaudeCodeAdd command", function()
 
       command_handler({ args = "/existing/file.lua" })
 
-      assert.spy(mock_server.broadcast).was_called()
+      assert.spy(mock_server.send_to_active).was_called()
 
       -- Restore original function
       claudecode._format_path_for_at_mention = original_format

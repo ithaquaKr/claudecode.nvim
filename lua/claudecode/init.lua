@@ -216,7 +216,7 @@ function M.process_mention_queue(from_new_connection)
         lineEnd = mention.end_line,
       }
 
-      local broadcast_success = M.state.server.broadcast("at_mentioned", params)
+      local broadcast_success = M.state.server.send_to_active("at_mentioned", params)
       if broadcast_success then
         logger.debug("queue", "Sent queued @ mention: " .. mention.file_path)
       else
@@ -587,14 +587,173 @@ function M._create_commands()
     desc = "Stop Claude Code integration",
   })
 
-  vim.api.nvim_create_user_command("ClaudeCodeStatus", function()
-    if M.state.server and M.state.port then
-      logger.info("command", "Claude Code integration is running on port " .. tostring(M.state.port))
-    else
-      logger.info("command", "Claude Code integration is not running")
+  local _status_winid = nil
+  local _status_bufnr = nil
+  local _status_autocmd = nil
+  local _account_sep_lnum = nil -- 0-based line index of the account section separator
+  local W = 54 -- popup content width
+
+  local function pad_lines(lines)
+    for i, l in ipairs(lines) do
+      local w = vim.fn.strdisplaywidth(l)
+      if w < W then lines[i] = l .. string.rep(" ", W - w) end
     end
+    return lines
+  end
+
+  local function open_win(buf)
+    local height = vim.api.nvim_buf_line_count(buf)
+    local col = math.floor((vim.o.columns - W) / 2)
+    local row = math.floor((vim.o.lines - height) / 2)
+    return vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      width = W,
+      height = height,
+      col = col,
+      row = row,
+      style = "minimal",
+      border = "rounded",
+    })
+  end
+
+  local function resize_win(winid, bufnr)
+    if not winid or not vim.api.nvim_win_is_valid(winid) then return end
+    local height = vim.api.nvim_buf_line_count(bufnr)
+    local row = math.floor((vim.o.lines - height) / 2)
+    vim.api.nvim_win_set_config(winid, {
+      relative = "editor",
+      width = W,
+      height = height,
+      col = math.floor((vim.o.columns - W) / 2),
+      row = row,
+    })
+  end
+
+  local function build_local_lines()
+    local lines = {}
+    local sep = "  " .. string.rep("─", W - 4)
+
+    -- Server
+    local server_ok, srv = pcall(require, "claudecode.server.init")
+    local st = server_ok and srv.get_status() or { running = false, client_count = 0 }
+    local badge = st.running and ("● running  ·  port " .. tostring(st.port)) or "○ stopped"
+    table.insert(lines, "  Server    " .. badge)
+    if st.running then
+      local n = st.client_count or 0
+      table.insert(lines, "  Clients   " .. n .. " connected")
+    end
+
+    -- Sessions
+    local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
+    if tm_ok then
+      local all = tm.get_sessions()
+      if #all > 0 then
+        table.insert(lines, sep)
+        table.insert(lines, "  Sessions")
+        table.insert(lines, "")
+        for _, s in ipairs(all) do
+          local icon = s.status == "active" and "●" or (s.status == "background" and "○" or "✕")
+          local lbl = vim.fn.strdisplaywidth(s.label) > W - 8
+            and (vim.fn.strcharpart(s.label, 0, W - 11) .. "…")
+            or s.label
+          table.insert(lines, "  " .. icon .. "  " .. lbl)
+        end
+      end
+    end
+
+    -- Account placeholder (replaced async). Record 0-based line index before inserting.
+    local acct_sep_lnum = #lines
+    table.insert(lines, sep)
+    table.insert(lines, "  Account   loading…")
+
+    pad_lines(lines)
+    return lines, acct_sep_lnum
+  end
+
+  local function close_status_popup()
+    if _status_autocmd then
+      pcall(vim.api.nvim_del_autocmd, _status_autocmd)
+      _status_autocmd = nil
+    end
+    if _status_winid and vim.api.nvim_win_is_valid(_status_winid) then
+      vim.api.nvim_win_close(_status_winid, true)
+    end
+    _status_winid = nil
+    _status_bufnr = nil
+    _account_sep_lnum = nil
+  end
+
+  vim.api.nvim_create_user_command("ClaudeCodeStatus", function()
+    -- Toggle: close if already open
+    if _status_winid and vim.api.nvim_win_is_valid(_status_winid) then
+      close_status_popup()
+      return
+    end
+
+    -- Clean up any stale autocmd from a previous session
+    if _status_autocmd then
+      pcall(vim.api.nvim_del_autocmd, _status_autocmd)
+      _status_autocmd = nil
+    end
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    local lines, acct_sep_lnum = build_local_lines()
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].bufhidden = "wipe"
+    _status_bufnr = buf
+    _account_sep_lnum = acct_sep_lnum
+
+    _status_winid = open_win(buf)
+    vim.wo[_status_winid].winhl = "Normal:Normal,FloatBorder:FloatBorder"
+
+    vim.keymap.set("n", "q", close_status_popup, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "<Esc>", close_status_popup, { buffer = buf, nowait = true, silent = true })
+
+    -- Auto-close when the user enters a different window or buffer.
+    -- Use vim.schedule so this doesn't fire from the command invocation itself.
+    vim.schedule(function()
+      if not _status_winid then return end -- already closed
+      _status_autocmd = vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter" }, {
+        callback = function()
+          -- Ignore events for the popup window/buffer itself
+          local cur_win = vim.api.nvim_get_current_win()
+          if cur_win == _status_winid then return end
+          close_status_popup()
+        end,
+      })
+    end)
+
+    -- Async: read credentials → fetch account data → update popup
+    local usage_ok, usage = pcall(require, "claudecode.usage")
+    if not usage_ok then return end
+
+    local token, token_err = usage.read_token()
+
+    local function replace_account_section(new_lines)
+      if not _status_bufnr or not vim.api.nvim_buf_is_valid(_status_bufnr) then return end
+      if _account_sep_lnum == nil then return end
+      pad_lines(new_lines)
+      vim.bo[_status_bufnr].modifiable = true
+      vim.api.nvim_buf_set_lines(_status_bufnr, _account_sep_lnum, -1, false, new_lines)
+      vim.bo[_status_bufnr].modifiable = false
+      resize_win(_status_winid, _status_bufnr)
+    end
+
+    if not token then
+      replace_account_section({
+        "  " .. string.rep("─", W - 4),
+        "  Account   " .. (token_err or "unavailable"),
+      })
+      return
+    end
+
+    usage.fetch(token, function(result, err)
+      local account_lines = usage.render_lines(result, err, W)
+      replace_account_section(account_lines)
+    end)
   end, {
-    desc = "Show Claude Code integration status",
+    desc = "Toggle Claude Code status popup (with account usage)",
   })
 
   ---@param file_paths table List of file paths to add
@@ -1265,11 +1424,11 @@ function M._broadcast_at_mention(file_path, start_line, end_line)
     (M.state.config and M.state.config.disable_broadcast_debouncing)
     or (package.loaded["busted"] and not (M.state.config and M.state.config.enable_broadcast_debouncing_in_tests))
   then
-    local broadcast_success = M.state.server.broadcast("at_mentioned", params)
+    local broadcast_success = M.state.server.send_to_active("at_mentioned", params)
     if broadcast_success then
       return true, nil
     else
-      local error_msg = "Failed to broadcast " .. (is_directory and "directory" or "file") .. " " .. formatted_path
+      local error_msg = "Failed to send " .. (is_directory and "directory" or "file") .. " " .. formatted_path
       logger.error("command", error_msg)
       return false, error_msg
     end
