@@ -726,7 +726,10 @@ function M._create_commands()
 
     -- Async: read credentials → fetch account data → update popup
     local usage_ok, usage = pcall(require, "claudecode.usage")
-    if not usage_ok then return end
+    if not usage_ok then
+      vim.notify("[ClaudeCodeStatus] Failed to load usage module: " .. tostring(usage), vim.log.levels.ERROR)
+      return
+    end
 
     local token, token_err = usage.read_token()
 
@@ -749,6 +752,9 @@ function M._create_commands()
     end
 
     usage.fetch(token, function(result, err)
+      if err then
+        vim.notify("[ClaudeCodeStatus] Usage fetch error: " .. err, vim.log.levels.WARN)
+      end
       local account_lines = usage.render_lines(result, err, W)
       replace_account_section(account_lines)
     end)
