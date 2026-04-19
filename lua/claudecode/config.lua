@@ -37,6 +37,8 @@ M.defaults = {
   session_management = {
     enabled = true,
   },
+  profiles = nil, -- Map of profile_name -> { claude_config_dir?, account_email?, env? }
+  default_profile = nil, -- Profile to use on startup (must be a key in profiles; nil = system default ~/.claude)
 }
 
 ---Validates the provided configuration table.
@@ -175,6 +177,45 @@ function M.validate(config)
         "session_management.enabled must be a boolean"
       )
     end
+  end
+
+  -- Validate profiles
+  if config.profiles ~= nil then
+    assert(type(config.profiles) == "table", "profiles must be a table")
+    for name, profile in pairs(config.profiles) do
+      assert(type(name) == "string" and name ~= "", "profile names must be non-empty strings")
+      assert(type(profile) == "table", "profile '" .. name .. "' must be a table")
+      if profile.claude_config_dir ~= nil then
+        assert(
+          type(profile.claude_config_dir) == "string",
+          "profile '" .. name .. "'.claude_config_dir must be a string"
+        )
+      end
+      if profile.account_email ~= nil then
+        assert(
+          type(profile.account_email) == "string" and profile.account_email ~= "",
+          "profile '" .. name .. "'.account_email must be a non-empty string"
+        )
+      end
+      if profile.env ~= nil then
+        assert(type(profile.env) == "table", "profile '" .. name .. "'.env must be a table")
+        for k, v in pairs(profile.env) do
+          assert(type(k) == "string", "profile '" .. name .. "' env keys must be strings")
+          assert(type(v) == "string", "profile '" .. name .. "' env values must be strings")
+        end
+      end
+    end
+  end
+
+  if config.default_profile ~= nil then
+    assert(
+      type(config.default_profile) == "string" and config.default_profile ~= "",
+      "default_profile must be a non-empty string"
+    )
+    assert(
+      config.profiles ~= nil and config.profiles[config.default_profile] ~= nil,
+      "default_profile '" .. config.default_profile .. "' is not defined in profiles"
+    )
   end
 
   -- Validate models

@@ -88,11 +88,12 @@ end
 
 ---List all Claude sessions for a given cwd, sorted newest first.
 ---@param cwd string Raw cwd (will be canonicalised internally)
+---@param projects_base string|nil Override for the projects base dir (default: ~/.claude/projects/)
 ---@return table sessions Array of {id, timestamp, formatted} tables
-function M._list_sessions(cwd)
+function M._list_sessions(cwd, projects_base)
   local canonical = M._canonical_cwd(cwd)
   local hash = M._hash_cwd(canonical)
-  local projects_base = vim.fn.expand("~/.claude/projects/")
+  projects_base = projects_base or vim.fn.expand("~/.claude/projects/")
   local dir = projects_base .. hash .. "/"
 
   local handle = vim.loop.fs_opendir(dir, nil, 100)

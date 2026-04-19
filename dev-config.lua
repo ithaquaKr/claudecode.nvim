@@ -81,6 +81,20 @@ return {
     --   snacks_win_opts = {},                     -- Opts to pass to `Snacks.terminal.open()`
     -- },
 
+    -- Profile Configuration (multi-account / API key support)
+    -- profiles = {
+    --   work = {
+    --     claude_config_dir = "~/.claude-work",
+    --     account_email = "work@example.com", -- macOS: pins this profile to the exact Keychain entry
+    --   },
+    --   personal = {
+    --     claude_config_dir = "~/.claude",
+    --     account_email = "personal@gmail.com",
+    --   },
+    --   api_key = { env = { ANTHROPIC_API_KEY = "sk-ant-..." } }, -- API key profile (no usage bars in Status)
+    -- },
+    -- default_profile = "work", -- must be a key in profiles (nil = use system default ~/.claude)
+
     -- Development overrides (uncomment as needed)
     -- log_level = "debug",
     -- terminal = {

@@ -6,9 +6,14 @@
 ---@module 'claudecode.lockfile'
 local M = {}
 
----Path to the lock file directory
+---Resolve the IDE lock-files directory, respecting the active profile when set.
+---Always called at runtime so profile switches are reflected immediately.
 ---@return string lock_dir The path to the lock file directory
 local function get_lock_dir()
+  local profiles_ok, profiles_module = pcall(require, "claudecode.profiles")
+  if profiles_ok and profiles_module.has_profiles and profiles_module.has_profiles() then
+    return profiles_module.get_lock_dir()
+  end
   local claude_config_dir = os.getenv("CLAUDE_CONFIG_DIR")
   if claude_config_dir and claude_config_dir ~= "" then
     return vim.fn.expand(claude_config_dir .. "/ide")
@@ -17,6 +22,8 @@ local function get_lock_dir()
   end
 end
 
+M.get_lock_dir = get_lock_dir
+-- Kept for backward compat; reflects state at load time, use get_lock_dir() for current value.
 M.lock_dir = get_lock_dir()
 
 -- Track if random seed has been initialized
@@ -81,15 +88,16 @@ function M.create(port, auth_token)
     return false, "Port number out of valid range (1-65535): " .. tostring(port)
   end
 
+  local lock_dir = get_lock_dir()
   local ok, err = pcall(function()
-    return vim.fn.mkdir(M.lock_dir, "p")
+    return vim.fn.mkdir(lock_dir, "p")
   end)
 
   if not ok then
     return false, "Failed to create lock directory: " .. (err or "unknown error")
   end
 
-  local lock_path = M.lock_dir .. "/" .. port .. ".lock"
+  local lock_path = lock_dir .. "/" .. port .. ".lock"
 
   local workspace_folders = M.get_workspace_folders()
   if not auth_token then
@@ -159,7 +167,7 @@ function M.remove(port)
     return false, "Invalid port number"
   end
 
-  local lock_path = M.lock_dir .. "/" .. port .. ".lock"
+  local lock_path = get_lock_dir() .. "/" .. port .. ".lock"
 
   if vim.fn.filereadable(lock_path) == 0 then
     return false, "Lock file does not exist: " .. lock_path
@@ -186,7 +194,7 @@ function M.update(port)
     return false, "Invalid port number"
   end
 
-  local exists = vim.fn.filereadable(M.lock_dir .. "/" .. port .. ".lock") == 1
+  local exists = vim.fn.filereadable(get_lock_dir() .. "/" .. port .. ".lock") == 1
   if exists then
     local remove_ok, remove_err = M.remove(port)
     if not remove_ok then
@@ -207,7 +215,7 @@ function M.get_auth_token(port)
     return false, nil, "Invalid port number"
   end
 
-  local lock_path = M.lock_dir .. "/" .. port .. ".lock"
+  local lock_path = get_lock_dir() .. "/" .. port .. ".lock"
 
   if vim.fn.filereadable(lock_path) == 0 then
     return false, nil, "Lock file does not exist: " .. lock_path

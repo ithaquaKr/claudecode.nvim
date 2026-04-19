@@ -406,6 +406,16 @@ function M.setup(opts)
     terminal_manager.setup(tm_cfg)
   end
 
+  -- Setup profiles module when profiles are configured
+  if M.state.config.profiles then
+    local profiles_ok, profiles_module = pcall(require, "claudecode.profiles")
+    if profiles_ok then
+      profiles_module.setup(M.state.config.profiles, M.state.config.default_profile)
+    else
+      logger.warn("init", "Failed to load claudecode.profiles module.")
+    end
+  end
+
   local diff = require("claudecode.diff")
   diff.setup(M.state.config)
 
@@ -643,6 +653,13 @@ function M._create_commands()
       table.insert(lines, "  Clients   " .. n .. " connected")
     end
 
+    -- Active profile (when profiles are configured)
+    local prof_ok, prof_mod = pcall(require, "claudecode.profiles")
+    if prof_ok and prof_mod.has_profiles() then
+      local active = prof_mod.get_active_name() or "—"
+      table.insert(lines, "  Profile   " .. active)
+    end
+
     -- Sessions
     local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
     if tm_ok then
@@ -724,14 +741,12 @@ function M._create_commands()
       })
     end)
 
-    -- Async: read credentials → fetch account data → update popup
+    -- Async: read credentials → fetch account/usage data → update popup
     local usage_ok, usage = pcall(require, "claudecode.usage")
     if not usage_ok then
       vim.notify("[ClaudeCodeStatus] Failed to load usage module: " .. tostring(usage), vim.log.levels.ERROR)
       return
     end
-
-    local token, token_err = usage.read_token()
 
     local function replace_account_section(new_lines)
       if not _status_bufnr or not vim.api.nvim_buf_is_valid(_status_bufnr) then return end
@@ -743,19 +758,8 @@ function M._create_commands()
       resize_win(_status_winid, _status_bufnr)
     end
 
-    if not token then
-      replace_account_section({
-        "  " .. string.rep("─", W - 4),
-        "  Account   " .. (token_err or "unavailable"),
-      })
-      return
-    end
-
-    usage.fetch(token, function(result, err)
-      if err then
-        vim.notify("[ClaudeCodeStatus] Usage fetch error: " .. err, vim.log.levels.WARN)
-      end
-      local account_lines = usage.render_lines(result, err, W)
+    usage.fetch_all_profiles(function(profile_results)
+      local account_lines = usage.render_all_profiles_lines(profile_results, W)
       replace_account_section(account_lines)
     end)
   end, {
@@ -1286,6 +1290,105 @@ function M._create_commands()
       logger.error("init", "No terminal backend found. ClaudeCode commands not registered.")
     end
   end
+
+  vim.api.nvim_create_user_command("ClaudeCodeProfile", function()
+    local profiles_ok, profiles_module = pcall(require, "claudecode.profiles")
+    if not profiles_ok or not profiles_module.has_profiles() then
+      vim.notify("claudecode: no profiles configured", vim.log.levels.WARN)
+      return
+    end
+
+    local all_profiles = profiles_module.get_all_profiles()
+    local current = profiles_module.get_active_name()
+
+    -- Build selection list: "(default)" entry only when no profile maps to ~/.claude
+    -- (avoids showing a redundant entry that duplicates e.g. a "personal" profile)
+    local default_path = vim.fn.expand("~/.claude")
+    local any_profile_is_default = false
+    for _, p in ipairs(all_profiles) do
+      local cfg_dir = profiles_module.get_config_dir(p.name)
+      if cfg_dir and vim.fn.expand(cfg_dir) == default_path then
+        any_profile_is_default = true
+        break
+      end
+    end
+
+    local options = {}
+    local profile_keys = {}
+    if not any_profile_is_default then
+      table.insert(options, current == nil and "(default ~/.claude)  ✓" or "(default ~/.claude)")
+      table.insert(profile_keys, nil) -- index maps to nil = no profile override
+    end
+    for _, p in ipairs(all_profiles) do
+      local marker = p.name == current and "  ✓" or ""
+      table.insert(options, p.name .. marker)
+      table.insert(profile_keys, p.name)
+    end
+
+    vim.ui.select(options, { prompt = "Select Claude profile:" }, function(_, idx)
+      if not idx then
+        return
+      end
+      local new_profile = profile_keys[idx]
+      if new_profile == current then
+        return
+      end
+
+      local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
+      local active_sessions = {}
+      if tm_ok then
+        for _, s in ipairs(tm.get_sessions()) do
+          if s.status ~= "dead" then
+            table.insert(active_sessions, s)
+          end
+        end
+      end
+
+      local function do_switch()
+        if tm_ok and #active_sessions > 0 then
+          for _, s in ipairs(active_sessions) do
+            tm.kill_session(s.id)
+          end
+        end
+
+        -- Move the server lockfile to the new profile's lock directory so that
+        -- Claude CLI sessions launched under the new profile can discover Neovim.
+        -- Remove from the OLD location first (before set_active changes get_lock_dir).
+        local lockfile_ok, lockfile_mod = pcall(require, "claudecode.lockfile")
+        if lockfile_ok and M.state.port and M.state.auth_token then
+          lockfile_mod.remove(M.state.port)
+          profiles_module.set_active(new_profile)
+          lockfile_mod.create(M.state.port, M.state.auth_token)
+        else
+          profiles_module.set_active(new_profile)
+        end
+
+        local label = new_profile or "(default)"
+        vim.notify('claudecode: switched to profile "' .. label .. '"', vim.log.levels.INFO)
+      end
+
+      if #active_sessions > 0 then
+        local word = #active_sessions == 1 and "session" or "sessions"
+        local from_label = current or "default"
+        local prompt = "Switch from \""
+          .. from_label
+          .. '"? This will stop '
+          .. #active_sessions
+          .. " active "
+          .. word
+          .. "."
+        vim.ui.select({ "Switch and stop sessions", "Cancel" }, { prompt = prompt }, function(_, aidx)
+          if aidx == 1 then
+            do_switch()
+          end
+        end)
+      else
+        do_switch()
+      end
+    end)
+  end, {
+    desc = "Switch the active Claude Code profile",
+  })
 
   -- Diff management commands
   vim.api.nvim_create_user_command("ClaudeCodeDiffAccept", function()
