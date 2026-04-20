@@ -488,7 +488,10 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
       if type(v) == "boolean" then
         defaults.group_by_profile = v
       else
-        vim.notify("claudecode.terminal.setup: Invalid value for group_by_profile: " .. tostring(v), vim.log.levels.WARN)
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for group_by_profile: " .. tostring(v),
+          vim.log.levels.WARN
+        )
       end
     else
       if k ~= "terminal_cmd" then

@@ -172,10 +172,7 @@ function M.validate(config)
   if config.session_management ~= nil then
     assert(type(config.session_management) == "table", "session_management must be a table")
     if config.session_management.enabled ~= nil then
-      assert(
-        type(config.session_management.enabled) == "boolean",
-        "session_management.enabled must be a boolean"
-      )
+      assert(type(config.session_management.enabled) == "boolean", "session_management.enabled must be a boolean")
     end
   end
 

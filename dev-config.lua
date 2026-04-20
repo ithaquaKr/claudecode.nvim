@@ -98,7 +98,7 @@ return {
     -- default_profile = "work", -- must be a key in profiles (nil = use system default ~/.claude)
 
     -- Development overrides (uncomment as needed)
-    -- log_level = "debug",
+    log_level = "debug",
     -- terminal = {
     --   provider = "native",
     --   auto_close = false, -- Keep terminals open to see output

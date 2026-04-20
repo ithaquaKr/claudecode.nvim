@@ -66,7 +66,10 @@ function M._parse_session_preview(path)
           -- Strip command message XML tags (Claude Code slash commands)
           text = text:gsub("<command%-message>.-</command%-message>", "")
           text = text:gsub("<command%-name>.-</command%-name>", "")
-          text = text:match("^%s*(.-)%s*$") -- trim
+          -- Use only the first line for the preview (multiline messages get
+          -- the first non-empty line; the trim pattern with `.` won't cross `\n`)
+          text = text:match("^[^\n\r]*") or ""
+          text = text:match("^%s*(.-)%s*$") or "" -- trim surrounding whitespace
           if text ~= "" then
             last_user_text = text
           end

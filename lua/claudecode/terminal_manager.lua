@@ -12,6 +12,8 @@
 
 local M = {}
 
+local logger = require("claudecode.logger")
+
 ---@class ClaudeSessionEntry
 ---@field id string Unique internal ID for this Neovim terminal instance
 ---@field bufnr number Neovim buffer number
@@ -25,6 +27,7 @@ local M = {}
 ---@field _snacks_term table|nil Snacks terminal instance, when using snacks provider
 ---@field client_id string|nil WebSocket client ID of the connected Claude CLI process
 ---@field profile string|nil Profile name this session was opened with (nil = default_profile)
+---@field _usage_str string|nil Compact usage summary ("5h:23% 7d:45%"), filled async after open
 
 ---@type ClaudeSessionEntry[]
 local sessions = {}
@@ -34,6 +37,140 @@ local active_id = nil
 
 ---@type table Terminal config (split_side, split_width_percentage, terminal_cmd, env, auto_close)
 local _cfg = {}
+
+-- Keyed by profile name (nil key stored as "_default"). Each entry: { usage_str, fetched_at }.
+local _usage_cache = {}
+
+---Build a compact usage string ("5h:23% 7d:45%") from a fetch result, or nil if no data.
+---@param result table
+---@return string|nil
+local function build_usage_summary(result)
+  if type(result) ~= "table" or type(result.usage) ~= "table" then
+    return nil
+  end
+  local u = result.usage
+  local parts = {}
+  if type(u.five_hour) == "table" then
+    local pct = math.floor((tonumber(u.five_hour.utilization) or 0) + 0.5)
+    table.insert(parts, "5h:" .. pct .. "%")
+  end
+  if type(u.seven_day) == "table" then
+    local pct = math.floor((tonumber(u.seven_day.utilization) or 0) + 0.5)
+    table.insert(parts, "7d:" .. pct .. "%")
+  end
+  return #parts > 0 and table.concat(parts, " ") or nil
+end
+
+---Build the winbar title string for a session.
+---Format: " Claude Code  ·  [profile]  ·  09:30 Apr 20  ·  5h:23% 7d:45% "
+---@param s ClaudeSessionEntry
+---@return string
+local function build_session_title(s)
+  local parts = { "Claude Code" }
+  if s.profile then
+    table.insert(parts, "[" .. s.profile .. "]")
+  end
+  table.insert(parts, os.date("%H:%M %b %d", s.created_at))
+  if s._usage_str then
+    table.insert(parts, s._usage_str)
+  end
+  return " " .. table.concat(parts, "  ·  ") .. " "
+end
+
+---Set the winbar on every window currently showing a session's buffer.
+---@param session_id string
+local function refresh_session_winbar(session_id)
+  local s
+  for _, e in ipairs(sessions) do
+    if e.id == session_id then
+      s = e
+      break
+    end
+  end
+  if not s then
+    return
+  end
+  if not s.bufnr or s.bufnr <= 0 or not vim.api.nvim_buf_is_valid(s.bufnr) then
+    return
+  end
+  local title = build_session_title(s)
+  if s._snacks_term then
+    -- Snacks terminal: update the buffer variable that the permanent winbar expression reads.
+    -- wo.winbar = "%{get(b:,'_cc_title','')}" is set in Snacks opts and re-applied by Snacks
+    -- on every show(), so the expression is always live in any new window. We only update
+    -- the buffer variable here — no window manipulation needed, no timing races.
+    vim.b[s.bufnr]._cc_title = title
+    vim.cmd("redrawstatus!")
+  else
+    -- Native terminal: set winbar directly on each window showing the buffer.
+    -- Escape % so the statusline parser treats them as literal percent signs.
+    local escaped = title:gsub("%%", "%%%%")
+    for _, winid in ipairs(vim.fn.win_findbuf(s.bufnr)) do
+      if vim.api.nvim_win_is_valid(winid) then
+        pcall(vim.api.nvim_set_option_value, "winbar", escaped, { win = winid })
+      end
+    end
+  end
+end
+
+---Fetch usage for a session's profile and update its winbar. Results are cached for 5 minutes.
+---Uses fetch_all_profiles so macOS Keychain entries are matched by account email rather than
+---always falling back to the first (default) Keychain entry.
+---@param session_id string
+local function fetch_usage_for_session(session_id)
+  -- Skip in test environments where vim.loop / Keychain APIs are unavailable.
+  if package.loaded["busted"] then
+    return
+  end
+
+  local s
+  for _, e in ipairs(sessions) do
+    if e.id == session_id then
+      s = e
+      break
+    end
+  end
+  if not s then
+    return
+  end
+
+  local cache_key = s.profile or "_default"
+  local cached = _usage_cache[cache_key]
+  if cached and (os.time() - cached.fetched_at) < 300 then
+    s._usage_str = cached.usage_str
+    refresh_session_winbar(session_id)
+    return
+  end
+
+  local usage_ok, usage_mod = pcall(require, "claudecode.usage")
+  if not usage_ok then
+    logger.debug("terminal_manager", "winbar usage: usage module not available")
+    return
+  end
+
+  logger.debug("terminal_manager", "winbar usage: fetching for profile:", s.profile or "default")
+  -- fetch_all_profiles handles macOS Keychain multi-account matching correctly (by account email),
+  -- whereas read_token() on macOS always falls back to the first Keychain entry regardless of
+  -- which profile is requested. Results for all profiles are cached in one shot.
+  usage_mod.fetch_all_profiles(function(results)
+    local now = os.time()
+    for _, pr in ipairs(results) do
+      local key = pr.name or "_default"
+      local usage_str = build_usage_summary(pr.result)
+      logger.debug("terminal_manager", "winbar usage: profile:", key, "usage_str:", tostring(usage_str))
+      _usage_cache[key] = { usage_str = usage_str, fetched_at = now }
+    end
+    -- Refresh winbars for all live sessions using the newly populated cache.
+    for _, e in ipairs(sessions) do
+      local ck = e.profile or "_default"
+      local c = _usage_cache[ck]
+      if c and c.usage_str then
+        e._usage_str = c.usage_str
+        refresh_session_winbar(e.id)
+      end
+    end
+  end)
+end
 
 --- Generate a simple unique ID
 local function gen_id()
@@ -191,18 +328,35 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
     -- Use Snacks.terminal.open so the window is a proper Snacks side panel —
     -- this matches what the old provider created and is what navigation plugins expect.
     local side = _cfg.split_side or "right"
+
+    -- Snacks.terminal.open() sets wo.winbar to its own computed expression
+    -- ("1: %{term_title}") unless we supply a value. We use a statusline
+    -- expression that reads a buffer variable — pure ASCII so Snacks can safely
+    -- apply it via scope="local". Snacks re-applies opts.wo on every show(), so
+    -- the expression is always present in new windows after hide/show cycles.
+    local base_win_opts = vim.tbl_deep_extend("force", {
+      position = side,
+      width = _cfg.split_width_percentage or 0.30,
+      height = 0,
+      relative = "editor",
+    }, (_cfg.snacks_win_opts or {}))
+    if not base_win_opts.wo then
+      base_win_opts.wo = {}
+    end
+    -- The expression reads b:_cc_title from the buffer; we update that variable
+    -- via refresh_session_winbar(). Because it's a buffer variable, it persists
+    -- across window hide/show cycles without any autocmds.
+    if base_win_opts.wo.winbar == nil then
+      base_win_opts.wo.winbar = "%{get(b:,'_cc_title','')}"
+    end
+
     local opts = {
       env = env,
       cwd = cwd,
       start_insert = true,
       auto_insert = true,
       auto_close = false, -- we handle cleanup ourselves
-      win = vim.tbl_deep_extend("force", {
-        position = side,
-        width = _cfg.split_width_percentage or 0.30,
-        height = 0,
-        relative = "editor",
-      }, (_cfg.snacks_win_opts or {})),
+      win = base_win_opts,
     }
 
     local term_instance = Snacks.terminal.open(cmd_string, opts)
@@ -213,6 +367,20 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
 
     entry.bufnr = term_instance.buf
     entry._snacks_term = term_instance
+
+    table.insert(sessions, entry)
+    active_id = session_id
+
+    -- Set initial title. b:_cc_title is read by the permanent winbar expression; Snacks
+    -- re-applies opts.wo on every show(), so no BufWinEnter autocmd is needed for persistence.
+    vim.schedule(function()
+      refresh_session_winbar(session_id)
+    end)
+
+    -- Async-update winbar with usage data after a short settle delay.
+    vim.defer_fn(function()
+      fetch_usage_for_session(session_id)
+    end, 500)
 
     -- Mark dead on process exit
     term_instance:on("TermClose", function()
@@ -243,8 +411,6 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
       end
     end, { buf = true })
 
-    table.insert(sessions, entry)
-    active_id = session_id
     return
   end
 
@@ -261,8 +427,7 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
     vim.cmd("enew")
   end)
 
-  local cmd_arg = cmd_string:find(" ", 1, true)
-    and vim.split(cmd_string, " ", { plain = true, trimempty = false })
+  local cmd_arg = cmd_string:find(" ", 1, true) and vim.split(cmd_string, " ", { plain = true, trimempty = false })
     or { cmd_string }
 
   local jobid = vim.fn.termopen(cmd_arg, {
@@ -270,6 +435,7 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
     cwd = cwd,
     on_exit = function(_, _, _)
       vim.schedule(function()
+        pcall(vim.api.nvim_del_augroup_by_name, "ClaudeCodeWinbar_" .. session_id)
         local s = find_by_id(session_id)
         if not s then
           return
@@ -297,6 +463,22 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id,
   vim.bo[entry.bufnr].bufhidden = "hide"
   table.insert(sessions, entry)
   active_id = session_id
+
+  -- Set initial winbar (profile + creation time) then async-update with usage.
+  refresh_session_winbar(session_id)
+
+  -- Re-apply winbar when the buffer re-enters a window (native creates new windows on re-show).
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    group = vim.api.nvim_create_augroup("ClaudeCodeWinbar_" .. session_id, { clear = true }),
+    buffer = entry.bufnr,
+    callback = function()
+      refresh_session_winbar(session_id)
+    end,
+  })
+
+  vim.defer_fn(function()
+    fetch_usage_for_session(session_id)
+  end, 500)
 
   vim.api.nvim_set_current_win(new_win)
   -- Defer startinsert so any typeahead queued before the terminal opens is flushed first
@@ -523,7 +705,6 @@ local function derive_label(resolved_args, cwd)
 
   return "Session " .. sid:sub(1, 8) .. "…"
 end
-
 
 --- Delete the Claude CLI session JSONL file from disk.
 ---@param claude_session_id string Session UUID
@@ -1102,10 +1283,8 @@ function M.show_picker(cwd)
           end
 
           local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✕ ")
-          local preview_text = matched_cs
-            and (matched_cs.preview ~= "(no preview)" and matched_cs.preview or nil)
-          local label = preview_text
-            and (#preview_text > 40 and preview_text:sub(1, 37) .. "…" or preview_text)
+          local preview_text = matched_cs and (matched_cs.preview ~= "(no preview)" and matched_cs.preview or nil)
+          local label = preview_text and (#preview_text > 40 and preview_text:sub(1, 37) .. "…" or preview_text)
             or s.label
           local ts = matched_cs and matched_cs.timestamp or s.created_at
           local time_str = format_item_time(ts)
@@ -1129,8 +1308,7 @@ function M.show_picker(cwd)
           local running = running_by_claude_id[cs.id]
           local icon, kind, status
           if running then
-            icon = running.status == "active" and "● "
-              or (running.status == "background" and "○ " or "✕ ")
+            icon = running.status == "active" and "● " or (running.status == "background" and "○ " or "✕ ")
             kind = "running"
             status = running.status
           else
@@ -1138,8 +1316,7 @@ function M.show_picker(cwd)
             kind = "inactive"
             status = "inactive"
           end
-          local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview
-            or cs.id:sub(1, 8) .. "…"
+          local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview or cs.id:sub(1, 8) .. "…"
           local label = #preview_text > 40 and (preview_text:sub(1, 37) .. "…") or preview_text
           local time_str = format_item_time(cs.timestamp)
           table.insert(items, {

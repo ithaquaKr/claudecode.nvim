@@ -18,12 +18,20 @@ end)()
 ---@param iso string e.g. "2026-04-17T17:30:00Z"
 ---@return number|nil
 local function iso_utc_to_epoch(iso)
-  if not iso or type(iso) ~= "string" then return nil end
+  if not iso or type(iso) ~= "string" then
+    return nil
+  end
   local y, mo, d, h, mi, s = iso:match("^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
-  if not y then return nil end
+  if not y then
+    return nil
+  end
   return os.time({
-    year = tonumber(y), month = tonumber(mo), day = tonumber(d),
-    hour = tonumber(h), min = tonumber(mi), sec = tonumber(s),
+    year = tonumber(y),
+    month = tonumber(mo),
+    day = tonumber(d),
+    hour = tonumber(h),
+    min = tonumber(mi),
+    sec = tonumber(s),
     isdst = false,
   }) + _TZ_OFF
 end
@@ -32,13 +40,18 @@ end
 ---@param secs number
 ---@return string
 local function fmt_remaining(secs)
-  if not secs or secs <= 0 then return "expired" end
+  if not secs or secs <= 0 then
+    return "expired"
+  end
   local d = math.floor(secs / 86400)
   local h = math.floor((secs % 86400) / 3600)
   local m = math.floor((secs % 3600) / 60)
-  if d > 0 then return d .. "d " .. h .. "h"
-  elseif h > 0 then return h .. "h " .. m .. "m"
-  else return m .. "m"
+  if d > 0 then
+    return d .. "d " .. h .. "h"
+  elseif h > 0 then
+    return h .. "h " .. m .. "m"
+  else
+    return m .. "m"
   end
 end
 
@@ -57,8 +70,12 @@ end
 local function platform()
   local uname = vim.loop.os_uname()
   local s = uname.sysname:lower()
-  if s:find("darwin") then return "darwin" end
-  if s:find("windows") or s:find("mingw") or s:find("cygwin") then return "windows" end
+  if s:find("darwin") then
+    return "darwin"
+  end
+  if s:find("windows") or s:find("mingw") or s:find("cygwin") then
+    return "windows"
+  end
   return "linux"
 end
 
@@ -110,13 +127,15 @@ local function enumerate_darwin_keychain_entries()
     -- Match both the named "svce" form and the raw 0x00000007 hex-key form.
     -- Accept any service name that starts with "Claude Code-credentials".
     local svce = line:match('"svce"<blob>="(Claude Code%-credentials[^"]*)"')
-              or line:match('0x00000007 <blob>="(Claude Code%-credentials[^"]*)"')
+      or line:match('0x00000007 <blob>="(Claude Code%-credentials[^"]*)"')
     if svce then
       in_target = true
       block_svce = svce
     end
     local acct = line:match('"acct"<blob>="([^"]*)"')
-    if acct then block_acct = acct end
+    if acct then
+      block_acct = acct
+    end
   end
   -- Flush the final block.
   if in_target and block_svce then
@@ -171,9 +190,7 @@ local function read_raw_creds(config_dir)
   end
 
   if platform() == "darwin" then
-    local raw = vim.fn.system(
-      "security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null"
-    )
+    local raw = vim.fn.system("security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null")
     if vim.v.shell_error ~= 0 or not raw or raw:match("^%s*$") then
       return nil, "Keychain: credentials not found — re-authenticate in Claude Code"
     end
@@ -195,7 +212,9 @@ end
 ---@return string|nil token, string|nil err
 function M.read_token(config_dir)
   local raw, err = read_raw_creds(config_dir)
-  if not raw then return nil, err end
+  if not raw then
+    return nil, err
+  end
 
   local ok, creds = pcall(vim.json.decode, raw)
   if not ok or type(creds) ~= "table" then
@@ -223,30 +242,44 @@ end
 local function curl_get(url, token, callback)
   local chunks = {}
   vim.fn.jobstart({
-    "curl", "-s", "--max-time", "10",
-    "-H", "Authorization: Bearer " .. token,
-    "-H", "anthropic-beta: oauth-2025-04-20",
-    "-H", "User-Agent: claude-code/2.0.37",
+    "curl",
+    "-s",
+    "--max-time",
+    "10",
+    "-H",
+    "Authorization: Bearer " .. token,
+    "-H",
+    "anthropic-beta: oauth-2025-04-20",
+    "-H",
+    "User-Agent: claude-code/2.0.37",
     url,
   }, {
     stdout_buffered = true,
     on_stdout = function(_, data)
       for _, line in ipairs(data) do
-        if line ~= "" then table.insert(chunks, line) end
+        if line ~= "" then
+          table.insert(chunks, line)
+        end
       end
     end,
     on_exit = function(_, code)
       local body = table.concat(chunks, "")
       if code ~= 0 or body == "" then
-        vim.schedule(function() callback(nil, "curl error (exit " .. code .. ")") end)
+        vim.schedule(function()
+          callback(nil, "curl error (exit " .. code .. ")")
+        end)
         return
       end
       local ok, parsed = pcall(vim.json.decode, body)
       if not ok then
-        vim.schedule(function() callback(nil, "invalid JSON from API") end)
+        vim.schedule(function()
+          callback(nil, "invalid JSON from API")
+        end)
         return
       end
-      vim.schedule(function() callback(parsed, nil) end)
+      vim.schedule(function()
+        callback(parsed, nil)
+      end)
     end,
   })
 end
@@ -262,16 +295,24 @@ function M.fetch(token, callback)
   local errors = {}
 
   local function done(key, data, err)
-    if err then table.insert(errors, err) end
-    if data then result[key] = data end
+    if err then
+      table.insert(errors, err)
+    end
+    if data then
+      result[key] = data
+    end
     pending = pending - 1
     if pending == 0 then
       callback(result, #errors > 0 and table.concat(errors, "; ") or nil)
     end
   end
 
-  curl_get(BASE .. "/api/oauth/usage", token, function(d, e) done("usage", d, e) end)
-  curl_get(BASE .. "/api/oauth/profile", token, function(d, e) done("profile", d, e) end)
+  curl_get(BASE .. "/api/oauth/usage", token, function(d, e)
+    done("usage", d, e)
+  end)
+  curl_get(BASE .. "/api/oauth/profile", token, function(d, e)
+    done("profile", d, e)
+  end)
 end
 
 ---Build the account + usage section lines for the status popup.
@@ -303,8 +344,12 @@ function M.render_lines(result, fetch_err, W)
     if (org.organization_type or "") == "claude_enterprise" then
       table.insert(badges, "ENTERPRISE")
     end
-    if account.has_claude_max then table.insert(badges, "MAX") end
-    if account.has_claude_pro then table.insert(badges, "PRO") end
+    if account.has_claude_max then
+      table.insert(badges, "MAX")
+    end
+    if account.has_claude_pro then
+      table.insert(badges, "PRO")
+    end
 
     local tier_map = {
       default_claude_max_5x = "5x",
@@ -312,7 +357,9 @@ function M.render_lines(result, fetch_err, W)
     }
     local tier = tier_map[org.rate_limit_tier or ""] or (org.rate_limit_tier or "")
     local plan_str = #badges > 0 and table.concat(badges, " · ") or "—"
-    if tier ~= "" then plan_str = plan_str .. "  ·  " .. tier end
+    if tier ~= "" then
+      plan_str = plan_str .. "  ·  " .. tier
+    end
     table.insert(lines, "  Plan      " .. plan_str)
   elseif fetch_err then
     table.insert(lines, "  Account   " .. fetch_err)
@@ -326,20 +373,26 @@ function M.render_lines(result, fetch_err, W)
     local BAR_W = 18
 
     local function usage_row(label, window)
-      if type(window) ~= "table" then return end
+      if type(window) ~= "table" then
+        return
+      end
       local pct = tonumber(window.utilization) or 0
       local epoch = iso_utc_to_epoch(window.resets_at)
       local reset_str = epoch and ("  → " .. fmt_remaining(epoch - os.time())) or ""
-      table.insert(lines, string.format(
-        "  %-8s  %s  %3d%%%s",
-        label, bar(pct, BAR_W), math.floor(pct + 0.5), reset_str
-      ))
+      table.insert(
+        lines,
+        string.format("  %-8s  %s  %3d%%%s", label, bar(pct, BAR_W), math.floor(pct + 0.5), reset_str)
+      )
     end
 
     usage_row("5-hour", usage.five_hour)
     usage_row("7-day", usage.seven_day)
-    if type(usage.seven_day_sonnet) == "table" then usage_row("7d/sonnet", usage.seven_day_sonnet) end
-    if type(usage.seven_day_opus) == "table" then usage_row("7d/opus", usage.seven_day_opus) end
+    if type(usage.seven_day_sonnet) == "table" then
+      usage_row("7d/sonnet", usage.seven_day_sonnet)
+    end
+    if type(usage.seven_day_opus) == "table" then
+      usage_row("7d/opus", usage.seven_day_opus)
+    end
   end
 
   return lines
@@ -410,7 +463,9 @@ function M.fetch_all_profiles(callback)
 
   local function fire_resolved()
     if #resolved == 0 then
-      table.sort(results, function(a, b) return (a.name or "") < (b.name or "") end)
+      table.sort(results, function(a, b)
+        return (a.name or "") < (b.name or "")
+      end)
       callback(results)
       return
     end
@@ -431,7 +486,9 @@ function M.fetch_all_profiles(callback)
 
   local function after_classification()
     pending_classification = pending_classification - 1
-    if pending_classification > 0 then return end
+    if pending_classification > 0 then
+      return
+    end
 
     if #keychain_profiles > 0 and platform() == "darwin" then
       local keychain_entries = enumerate_darwin_keychain_entries()
@@ -442,14 +499,17 @@ function M.fetch_all_profiles(callback)
         local raw, _ = read_darwin_creds_for_entry(entry)
         if raw then
           local t, _ = token_from_raw(raw)
-          if t then table.insert(kc_tokens, t) end
+          if t then
+            table.insert(kc_tokens, t)
+          end
         end
       end
 
       if #kc_tokens == 0 then
         for _, name in ipairs(keychain_profiles) do
           table.insert(results, {
-            name = name, result = {},
+            name = name,
+            result = {},
             err = "Keychain: no credentials found — re-authenticate in Claude Code",
           })
         end
@@ -498,7 +558,8 @@ function M.fetch_all_profiles(callback)
         for email, pname in pairs(email_to_profile) do
           if not claimed[pname] then
             table.insert(results, {
-              name = pname, result = {},
+              name = pname,
+              result = {},
               err = "No Keychain account matching " .. email .. " — verify account_email in profile config",
             })
           end
@@ -511,7 +572,8 @@ function M.fetch_all_profiles(callback)
             table.insert(results, { name = name, result = kr.result, err = kr.err })
           else
             table.insert(results, {
-              name = name, result = {},
+              name = name,
+              result = {},
               err = "Keychain: no credentials for this profile",
             })
           end
@@ -566,7 +628,9 @@ function M.fetch_all_profiles(callback)
         if f then
           local raw = f:read("*a")
           f:close()
-          if raw and raw ~= "" then file_raw = raw end
+          if raw and raw ~= "" then
+            file_raw = raw
+          end
         end
       end
 
@@ -619,7 +683,9 @@ function M.render_all_profiles_lines(profile_results, W)
   -- Mark the default profile with ● so it's easy to spot
   local default_name
   local prof_ok, prof_mod = pcall(require, "claudecode.profiles")
-  if prof_ok then default_name = prof_mod.get_active_name() end
+  if prof_ok then
+    default_name = prof_mod.get_active_name()
+  end
 
   for _, pr in ipairs(profile_results) do
     -- Blank line before each profile entry

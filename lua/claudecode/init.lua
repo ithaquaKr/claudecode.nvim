@@ -619,7 +619,9 @@ function M._create_commands()
   local function pad_lines(lines)
     for i, l in ipairs(lines) do
       local w = vim.fn.strdisplaywidth(l)
-      if w < W then lines[i] = l .. string.rep(" ", W - w) end
+      if w < W then
+        lines[i] = l .. string.rep(" ", W - w)
+      end
     end
     return lines
   end
@@ -640,7 +642,9 @@ function M._create_commands()
   end
 
   local function resize_win(winid, bufnr)
-    if not winid or not vim.api.nvim_win_is_valid(winid) then return end
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+      return
+    end
     local height = vim.api.nvim_buf_line_count(bufnr)
     local row = math.floor((vim.o.lines - height) / 2)
     vim.api.nvim_win_set_config(winid, {
@@ -687,9 +691,10 @@ function M._create_commands()
           local icon = s.status == "active" and "●" or (s.status == "background" and "○" or "✕")
           local tag = (show_profile and s.profile) and ("[" .. s.profile .. "] ") or ""
           local max_lbl = W - 8 - #tag
-          local lbl = vim.fn.strdisplaywidth(s.label) > max_lbl
-            and (vim.fn.strcharpart(s.label, 0, max_lbl - 3) .. "…")
-            or s.label
+          local raw_label = s.label:gsub("[\n\r]", " ")
+          local lbl = vim.fn.strdisplaywidth(raw_label) > max_lbl
+              and (vim.fn.strcharpart(raw_label, 0, max_lbl - 3) .. "…")
+            or raw_label
           table.insert(lines, "  " .. icon .. "  " .. tag .. lbl)
         end
       end
@@ -747,12 +752,16 @@ function M._create_commands()
     -- Auto-close when the user enters a different window or buffer.
     -- Use vim.schedule so this doesn't fire from the command invocation itself.
     vim.schedule(function()
-      if not _status_winid then return end -- already closed
+      if not _status_winid then
+        return
+      end -- already closed
       _status_autocmd = vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter" }, {
         callback = function()
           -- Ignore events for the popup window/buffer itself
           local cur_win = vim.api.nvim_get_current_win()
-          if cur_win == _status_winid then return end
+          if cur_win == _status_winid then
+            return
+          end
           close_status_popup()
         end,
       })
@@ -766,8 +775,12 @@ function M._create_commands()
     end
 
     local function replace_account_section(new_lines)
-      if not _status_bufnr or not vim.api.nvim_buf_is_valid(_status_bufnr) then return end
-      if _account_sep_lnum == nil then return end
+      if not _status_bufnr or not vim.api.nvim_buf_is_valid(_status_bufnr) then
+        return
+      end
+      if _account_sep_lnum == nil then
+        return
+      end
       pad_lines(new_lines)
       vim.bo[_status_bufnr].modifiable = true
       vim.api.nvim_buf_set_lines(_status_bufnr, _account_sep_lnum, -1, false, new_lines)
@@ -1285,7 +1298,9 @@ function M._create_commands()
         table.insert(keys, p.name)
       end
       vim.ui.select(options, { prompt = "Open session for profile:" }, function(_, idx)
-        if not idx then return end
+        if not idx then
+          return
+        end
         vim.schedule(function()
           tm.new_session_with_profile(keys[idx])
         end)
@@ -1402,7 +1417,7 @@ function M._create_commands()
       if #active_sessions > 0 then
         local word = #active_sessions == 1 and "session" or "sessions"
         local from_label = current or "default"
-        local prompt = "Switch from \""
+        local prompt = 'Switch from "'
           .. from_label
           .. '"? This will stop '
           .. #active_sessions

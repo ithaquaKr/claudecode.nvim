@@ -41,7 +41,9 @@ function M.get_all_lock_dirs()
         table.insert(dirs, dir)
       end
     end
-    if #dirs > 0 then return dirs end
+    if #dirs > 0 then
+      return dirs
+    end
   end
   return { get_lock_dir() }
 end
@@ -234,7 +236,9 @@ function M.sync_all(port, auth_token)
   local dirs = M.get_all_lock_dirs()
   local any_ok = false
   for _, dir in ipairs(dirs) do
-    pcall(function() vim.fn.mkdir(dir, "p") end)
+    pcall(function()
+      vim.fn.mkdir(dir, "p")
+    end)
     local lock_path = dir .. "/" .. port .. ".lock"
     local workspace_folders = M.get_workspace_folders()
     local lock_content = {
