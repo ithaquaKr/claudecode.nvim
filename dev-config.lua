@@ -12,7 +12,7 @@ return {
 
     -- Core Claude commands
     { "<leader>ac", "<cmd>ClaudeCode<cr>", desc = "Toggle Claude" },
-    { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude" },
+    { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude", icon = "󱁐" },
     { "<leader>am", "<cmd>ClaudeCodeSelectModel<cr>", desc = "Select Claude model" },
 
     -- Context sending
@@ -27,13 +27,14 @@ return {
 
     -- Multi-session management
     { "<leader>an", "<cmd>ClaudeCodeSessionNew<cr>", desc = "New Claude session" },
+    { "<leader>aN", "<cmd>ClaudeCodeSessionFor<cr>", desc = "New Claude session for profile" },
     { "<leader>a<Tab>", "<cmd>ClaudeCodeSessionSwitch<cr>", desc = "Switch Claude session" },
     { "<leader>ak", "<cmd>ClaudeCodeSessionKill<cr>", desc = "Kill active Claude session" },
 
     -- Development helpers
     { "<leader>ao", "<cmd>ClaudeCodeOpen<cr>", desc = "Open Claude" },
     { "<leader>aq", "<cmd>ClaudeCodeClose<cr>", desc = "Close Claude" },
-    { "<leader>ai", "<cmd>ClaudeCodeStatus<cr>", desc = "Claude Status" },
+    { "<leader>ai", "<cmd>ClaudeCodeStatus<cr>", desc = "Claude Status", icon = "" },
     { "<leader>aS", "<cmd>ClaudeCodeStart<cr>", desc = "Start Claude Server" },
     { "<leader>aQ", "<cmd>ClaudeCodeStop<cr>", desc = "Stop Claude Server" },
 
@@ -79,6 +80,7 @@ return {
     --   show_native_term_exit_tip = true,         -- Show exit tip for native terminal
     --   auto_close = true,                        -- Auto-close terminal after command completion
     --   snacks_win_opts = {},                     -- Opts to pass to `Snacks.terminal.open()`
+    --   group_by_profile = false,                 -- When true, session picker groups by profile instead of sorting by recency
     -- },
 
     -- Profile Configuration (multi-account / API key support)

@@ -76,24 +76,24 @@ This is **not a terminal state** — there is no entry in the `sessions` table. 
 
 When the picker builds its item list it merges both sources:
 
-| Has JSONL file | Has live terminal | Displayed as |
-|:--------------:|:-----------------:|:------------:|
-| yes | yes (`active`) | `●` LIVE |
-| yes | yes (`background`) | `○` BG |
-| yes | yes (`dead`) | `✕` DEAD |
-| yes | no | `·` HISTORY |
-| no | yes | `●` / `○` / `✕` (anonymous) |
+| Has JSONL file | Has live terminal  |        Displayed as         |
+| :------------: | :----------------: | :-------------------------: |
+|      yes       |   yes (`active`)   |          `●` LIVE           |
+|      yes       | yes (`background`) |           `○` BG            |
+|      yes       |    yes (`dead`)    |          `✕` DEAD           |
+|      yes       |         no         |         `·` HISTORY         |
+|       no       |        yes         | `●` / `○` / `✕` (anonymous) |
 
 Selecting a `· inactive` item calls `M.resume_session(uuid)`, which spawns a new terminal with `claude --resume <uuid>`, transitioning it to `● active`.
 
 ## State Summary
 
-| Badge | Label | Terminal entry? | Window open? | Process alive? |
-|-------|-------|:---------------:|:------------:|:--------------:|
-| `●` | LIVE | yes | yes | yes |
-| `○` | BG | yes | no | yes |
-| `✕` | DEAD | yes (until restart) | no | no |
-| `·` | HISTORY | no | no | no |
+| Badge | Label   |   Terminal entry?   | Window open? | Process alive? |
+| ----- | ------- | :-----------------: | :----------: | :------------: |
+| `●`   | LIVE    |         yes         |     yes      |      yes       |
+| `○`   | BG      |         yes         |      no      |      yes       |
+| `✕`   | DEAD    | yes (until restart) |      no      |       no       |
+| `·`   | HISTORY |         no          |      no      |       no       |
 
 ## Anonymous Sessions
 
@@ -101,11 +101,12 @@ A session is **anonymous** when a terminal has been spawned (e.g. via `M.new_ses
 
 ## Key Functions
 
-| Function | Effect on state |
-|----------|-----------------|
-| `M.new_session()` | hides active → spawns new `● active` |
-| `M.resume_session(uuid)` | hides active → spawns new `● active` resuming that UUID |
-| `M.switch_to(id)` | hides active → makes target `● active` |
-| `hide_active()` | `● active` → `○ background`, clears `active_id` |
-| `M.kill_session(id)` | forcibly closes window/process → `✕ dead`, removes from table |
-| process exit (any) | `● active` or `○ background` → `✕ dead` |
+| Function                 | Effect on state                                               |
+| ------------------------ | ------------------------------------------------------------- |
+| `M.new_session()`        | hides active → spawns new `● active`                          |
+| `M.resume_session(uuid)` | hides active → spawns new `● active` resuming that UUID       |
+| `M.switch_to(id)`        | hides active → makes target `● active`                        |
+| `hide_active()`          | `● active` → `○ background`, clears `active_id`               |
+| `M.kill_session(id)`     | forcibly closes window/process → `✕ dead`, removes from table |
+| process exit (any)       | `● active` or `○ background` → `✕ dead`                       |
+

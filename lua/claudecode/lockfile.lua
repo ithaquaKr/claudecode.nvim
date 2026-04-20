@@ -26,6 +26,26 @@ M.get_lock_dir = get_lock_dir
 -- Kept for backward compat; reflects state at load time, use get_lock_dir() for current value.
 M.lock_dir = get_lock_dir()
 
+---Return the lock-file directories for every configured profile.
+---When no profiles are configured, returns the single default lock dir.
+---@return string[] dirs
+function M.get_all_lock_dirs()
+  local profiles_ok, profiles_module = pcall(require, "claudecode.profiles")
+  if profiles_ok and profiles_module.has_profiles and profiles_module.has_profiles() then
+    local dirs = {}
+    local seen = {}
+    for _, p in ipairs(profiles_module.get_all_profiles()) do
+      local dir = profiles_module.get_lock_dir(p.name)
+      if not seen[dir] then
+        seen[dir] = true
+        table.insert(dirs, dir)
+      end
+    end
+    if #dirs > 0 then return dirs end
+  end
+  return { get_lock_dir() }
+end
+
 -- Track if random seed has been initialized
 local random_initialized = false
 
@@ -203,6 +223,50 @@ function M.update(port)
   end
 
   return M.create(port)
+end
+
+---Write the lock file to every configured profile lock directory.
+---Called at server start so Claude CLI sessions under any profile can discover Neovim.
+---@param port number
+---@param auth_token string Pre-generated auth token
+---@return boolean success true if at least one lockfile was written
+function M.sync_all(port, auth_token)
+  local dirs = M.get_all_lock_dirs()
+  local any_ok = false
+  for _, dir in ipairs(dirs) do
+    pcall(function() vim.fn.mkdir(dir, "p") end)
+    local lock_path = dir .. "/" .. port .. ".lock"
+    local workspace_folders = M.get_workspace_folders()
+    local lock_content = {
+      pid = vim.fn.getpid(),
+      workspaceFolders = workspace_folders,
+      ideName = "Neovim",
+      transport = "ws",
+      authToken = auth_token,
+    }
+    local ok_json, json = pcall(vim.json.encode, lock_content)
+    if ok_json and json then
+      local f = io.open(lock_path, "w")
+      if f then
+        f:write(json)
+        f:close()
+        any_ok = true
+      end
+    end
+  end
+  return any_ok
+end
+
+---Remove the lock file from every configured profile lock directory.
+---Called at server stop to clean up all locations written by sync_all.
+---@param port number
+function M.remove_all(port)
+  for _, dir in ipairs(M.get_all_lock_dirs()) do
+    local lock_path = dir .. "/" .. port .. ".lock"
+    if vim.fn.filereadable(lock_path) == 1 then
+      pcall(os.remove, lock_path)
+    end
+  end
 end
 
 ---Read the authentication token from a lock file

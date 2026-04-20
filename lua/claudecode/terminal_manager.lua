@@ -21,8 +21,10 @@ local M = {}
 ---@field claude_session_id string|nil UUID of the Claude CLI session file, if known
 ---@field status "active"|"background"|"dead" Visibility/alive state
 ---@field created_at number Unix timestamp of creation
+---@field last_attached_at number Unix timestamp of the last time this session became active
 ---@field _snacks_term table|nil Snacks terminal instance, when using snacks provider
 ---@field client_id string|nil WebSocket client ID of the connected Claude CLI process
+---@field profile string|nil Profile name this session was opened with (nil = default_profile)
 
 ---@type ClaudeSessionEntry[]
 local sessions = {}
@@ -97,6 +99,16 @@ local function hide_buf_windows(bufnr)
   end
 end
 
+--- Return the current active/default profile name, or nil when profiles are not configured.
+---@return string|nil
+local function active_profile_name()
+  local ok, mod = pcall(require, "claudecode.profiles")
+  if ok and mod.has_profiles and mod.has_profiles() then
+    return mod.get_active_name()
+  end
+  return nil
+end
+
 --- Find the best editor window to split from: non-floating, non-terminal.
 --- Prefers the currently focused window so the split opens where the user expects.
 --- Only falls back to searching when the current window is floating (e.g. a picker)
@@ -155,7 +167,8 @@ end
 ---@param label string Display label
 ---@param cwd string Working directory
 ---@param claude_session_id string|nil Claude CLI session UUID
-local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
+---@param profile string|nil Profile name this session is opened with
+local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id, profile)
   local session_id = gen_id()
   ---@type ClaudeSessionEntry
   local entry = {
@@ -167,8 +180,10 @@ local function open_new_terminal(cmd_string, env, label, cwd, claude_session_id)
     claude_session_id = claude_session_id,
     status = "active",
     created_at = os.time(),
+    last_attached_at = os.time(),
     _snacks_term = nil,
     client_id = nil,
+    profile = profile,
   }
 
   local snacks_ok, Snacks = pcall(require, "snacks")
@@ -435,8 +450,9 @@ end
 
 --- Build claude command string and environment table.
 ---@param resolved_args string|nil Args from session picker (e.g. "--resume UUID")
+---@param profile_name string|nil Profile to use (nil = active/default profile)
 ---@return string cmd, table env
-local function build_cmd_env(resolved_args)
+local function build_cmd_env(resolved_args, profile_name)
   local server = require("claudecode.server.init")
   local base = _cfg.terminal_cmd or "claude"
   local cmd = (resolved_args and resolved_args ~= "") and (base .. " " .. resolved_args) or base
@@ -452,10 +468,10 @@ local function build_cmd_env(resolved_args)
   for k, v in pairs(_cfg.env or {}) do
     env[k] = v
   end
-  -- Active profile env overrides global config (includes CLAUDE_CONFIG_DIR when set)
+  -- Per-session profile env overrides global config (includes CLAUDE_CONFIG_DIR when set)
   local profiles_ok, profiles_module = pcall(require, "claudecode.profiles")
   if profiles_ok and profiles_module.has_profiles and profiles_module.has_profiles() then
-    for k, v in pairs(profiles_module.get_profile_env()) do
+    for k, v in pairs(profiles_module.get_profile_env(profile_name)) do
       env[k] = v
     end
   end
@@ -612,18 +628,32 @@ end
 --- Hides the current active session and spawns a fresh terminal.
 ---@param forced_args string|nil Optional extra CLI args (e.g. "--verbose")
 function M.new_session(forced_args)
+  local profile = active_profile_name()
   local cwd = vim.fn.getcwd()
   local label = derive_label(forced_args, cwd)
-  local cmd, env = build_cmd_env(forced_args)
+  local cmd, env = build_cmd_env(forced_args, profile)
   hide_active()
-  open_new_terminal(cmd, env, label, cwd, nil)
+  open_new_terminal(cmd, env, label, cwd, nil, profile)
+end
+
+--- Open a new Claude terminal session bound to a specific profile.
+--- The Claude CLI process is launched with the profile's CLAUDE_CONFIG_DIR so it
+--- uses the correct account credentials, independent of the current default profile.
+---@param profile_name string The profile to use for this session
+function M.new_session_with_profile(profile_name)
+  local cwd = vim.fn.getcwd()
+  local label = derive_label(nil, cwd)
+  local cmd, env = build_cmd_env(nil, profile_name)
+  hide_active()
+  open_new_terminal(cmd, env, label, cwd, nil, profile_name)
 end
 
 --- Resume a specific Claude CLI session by its UUID, bypassing the session picker.
 --- If a terminal for that session is already running, switch to it instead.
 ---@param claude_session_id string The Claude CLI session UUID to resume
 ---@param cwd string|nil Working directory (defaults to vim.fn.getcwd())
-function M.resume_session(claude_session_id, cwd)
+---@param profile_name string|nil Profile the session belongs to (nil = active default)
+function M.resume_session(claude_session_id, cwd, profile_name)
   cwd = cwd or vim.fn.getcwd()
 
   -- If there's already a live terminal for this Claude session, just switch to it
@@ -634,13 +664,14 @@ function M.resume_session(claude_session_id, cwd)
     end
   end
 
-  -- No running terminal — open a new one resuming this session
+  -- No running terminal — open a new one resuming this session using the correct profile
+  local profile = profile_name or active_profile_name()
   local resolved_args = "--resume " .. claude_session_id
   local label = derive_label(resolved_args, cwd)
-  local cmd, env = build_cmd_env(resolved_args)
+  local cmd, env = build_cmd_env(resolved_args, profile)
 
   hide_active()
-  open_new_terminal(cmd, env, label, cwd, claude_session_id)
+  open_new_terminal(cmd, env, label, cwd, claude_session_id, profile)
 end
 
 --- Switch to a running session by its internal terminal ID.
@@ -671,6 +702,7 @@ function M.switch_to(session_id)
   hide_active()
   show_existing_terminal(s)
   s.status = "active"
+  s.last_attached_at = os.time()
   active_id = session_id
   sync_active_client(s)
   -- Defer startinsert so any typeahead from picker/<CR> is flushed first
@@ -759,9 +791,10 @@ function M.toggle()
   end
 
   -- No active or background session — open a fresh one directly, no picker
-  local cmd, env = build_cmd_env(nil)
+  local profile = active_profile_name()
+  local cmd, env = build_cmd_env(nil, profile)
   local label = derive_label(nil, cwd)
-  open_new_terminal(cmd, env, label, cwd, nil)
+  open_new_terminal(cmd, env, label, cwd, nil, profile)
 end
 
 --- Open / show-and-focus the active session. Never hides it.
@@ -809,9 +842,10 @@ function M.open()
   end
 
   -- No session — create one
-  local cmd, env = build_cmd_env(nil)
+  local profile = active_profile_name()
+  local cmd, env = build_cmd_env(nil, profile)
   local label = derive_label(nil, cwd)
-  open_new_terminal(cmd, env, label, cwd, nil)
+  open_new_terminal(cmd, env, label, cwd, nil, profile)
 end
 
 --- Show the active session without stealing focus or entering insert mode.
@@ -848,9 +882,10 @@ function M.ensure_visible()
 
   -- No session — create one but stay focused on the current window
   local orig = vim.api.nvim_get_current_win()
-  local cmd, env = build_cmd_env(nil)
+  local profile = active_profile_name()
+  local cmd, env = build_cmd_env(nil, profile)
   local label = derive_label(nil, cwd)
-  open_new_terminal(cmd, env, label, cwd, nil)
+  open_new_terminal(cmd, env, label, cwd, nil, profile)
   -- open_new_terminal enters insert mode via vim.schedule; override to stay on orig
   vim.schedule(function()
     vim.api.nvim_set_current_win(orig)
@@ -898,9 +933,10 @@ function M.focus_toggle()
   end
   -- No active session — open fresh directly, no picker
   local cwd = vim.fn.getcwd()
-  local cmd, env = build_cmd_env(nil)
+  local profile = active_profile_name()
+  local cmd, env = build_cmd_env(nil, profile)
   local label = derive_label(nil, cwd)
-  open_new_terminal(cmd, env, label, cwd, nil)
+  open_new_terminal(cmd, env, label, cwd, nil, profile)
 end
 
 --- Kill the currently active session (if any).
@@ -978,6 +1014,31 @@ function M.show_picker(cwd)
     return projects_base .. hash .. "/"
   end
 
+  --- Format a Unix timestamp into a compact, human-readable age string.
+  --- < 1 hour  → "5m ago"
+  --- same day  → "14:32"
+  --- this year → "Apr 20"
+  --- older     → "2024 Apr 20"
+  ---@param ts number Unix timestamp
+  ---@return string
+  local function format_item_time(ts)
+    local now = os.time()
+    local diff = now - ts
+    if diff < 3600 then
+      local mins = math.max(1, math.floor(diff / 60))
+      return mins .. "m ago"
+    end
+    local t = os.date("*t", ts)
+    local today = os.date("*t", now)
+    if t.year == today.year and t.month == today.month and t.day == today.day then
+      return os.date("%H:%M", ts)
+    end
+    if t.year == today.year then
+      return os.date("%b %d", ts)
+    end
+    return os.date("%Y %b %d", ts)
+  end
+
   --- Build merged item list from running terminals + Claude CLI session files.
   --- With profiles configured, merges sessions from all profiles, tagged by profile name.
   --- Each item includes a `session_file` path so the preview function can read it.
@@ -987,10 +1048,8 @@ function M.show_picker(cwd)
     local session_ok, session_module = pcall(require, "claudecode.session")
 
     --- Add items for one profile (or the default config when profile_name is nil).
-    --- is_active_profile=true means running terminals may exist for this profile.
     ---@param profile_name string|nil
-    ---@param is_active_profile boolean
-    local function add_profile_items(profile_name, is_active_profile)
+    local function add_profile_items(profile_name)
       local prefix = has_profiles and ("[" .. (profile_name or "default") .. "] ") or ""
 
       local projects_base
@@ -1007,96 +1066,114 @@ function M.show_picker(cwd)
 
       local session_dir = resolve_session_dir(projects_base)
 
-      if is_active_profile then
-        -- Running terminals (only exist for the currently active profile)
-        local running_by_claude_id = {}
-        for _, s in ipairs(sessions_for_cwd(cwd)) do
-          if s.claude_session_id then
-            running_by_claude_id[s.claude_session_id] = s
-          end
+      -- Pre-load all disk sessions so we can match anonymous running terminals
+      local claude_sessions = {}
+      if session_ok then
+        local ok2, cs_list = pcall(session_module._list_sessions, cwd, projects_base)
+        if ok2 and cs_list then
+          claude_sessions = cs_list
         end
+      end
 
-        -- Anonymous running sessions (no JSONL yet)
-        for _, s in ipairs(sessions_for_cwd(cwd)) do
-          if not s.claude_session_id then
-            local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✕ ")
-            table.insert(items, {
-              text = icon .. prefix .. s.label,
-              kind = "running",
-              terminal_id = s.id,
-              session_status = s.status,
-              session_file = nil,
-              profile_name = profile_name,
-            })
-          end
+      -- Running terminals whose stored profile matches this profile_name
+      local running_by_claude_id = {}
+      for _, s in ipairs(sessions_for_cwd(cwd)) do
+        if s.profile == profile_name and s.claude_session_id then
+          running_by_claude_id[s.claude_session_id] = s
         end
+      end
 
-        -- Sessions from disk, annotated with live status when also running
-        if session_ok then
-          local ok2, claude_sessions = pcall(session_module._list_sessions, cwd, projects_base)
-          if ok2 and claude_sessions then
-            for _, cs in ipairs(claude_sessions) do
-              local running = running_by_claude_id[cs.id]
-              local icon, kind, status
-              if running then
-                icon = running.status == "active" and "● "
-                  or (running.status == "background" and "○ " or "✕ ")
-                kind = "running"
-                status = running.status
-              else
-                icon = "· "
-                kind = "inactive"
-                status = "inactive"
-              end
-              local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview
-                or cs.id:sub(1, 8) .. "…"
-              local label = #preview_text > 55 and (preview_text:sub(1, 52) .. "…") or preview_text
-              table.insert(items, {
-                text = icon .. prefix .. label,
-                kind = kind,
-                terminal_id = running and running.id or nil,
-                claude_session_id = cs.id,
-                session_status = status,
-                session_file = session_dir and (session_dir .. cs.id .. ".jsonl") or nil,
-                profile_name = profile_name,
-              })
+      -- Anonymous running sessions (no claude_session_id yet).
+      -- Try to match each to a recently-created JSONL (timestamp >= session start).
+      -- On match, update the session entry so resume and future picker calls work correctly.
+      -- Track matched JSONL ids so the disk-session loop below doesn't duplicate them.
+      local claimed_by_anon = {}
+      for _, s in ipairs(sessions_for_cwd(cwd)) do
+        if s.profile == profile_name and not s.claude_session_id then
+          local matched_cs = nil
+          for _, cs in ipairs(claude_sessions) do
+            if cs.timestamp >= s.created_at and not running_by_claude_id[cs.id] then
+              matched_cs = cs
+              s.claude_session_id = cs.id
+              running_by_claude_id[cs.id] = s
+              claimed_by_anon[cs.id] = true
+              break
             end
           end
+
+          local icon = s.status == "active" and "● " or (s.status == "background" and "○ " or "✕ ")
+          local preview_text = matched_cs
+            and (matched_cs.preview ~= "(no preview)" and matched_cs.preview or nil)
+          local label = preview_text
+            and (#preview_text > 40 and preview_text:sub(1, 37) .. "…" or preview_text)
+            or s.label
+          local ts = matched_cs and matched_cs.timestamp or s.created_at
+          local time_str = format_item_time(ts)
+          table.insert(items, {
+            text = icon .. prefix .. time_str .. "  · " .. label,
+            kind = "running",
+            terminal_id = s.id,
+            claude_session_id = s.claude_session_id,
+            session_status = s.status,
+            session_file = matched_cs and session_dir and (session_dir .. matched_cs.id .. ".jsonl") or nil,
+            profile_name = profile_name,
+            timestamp = ts,
+          })
         end
-      else
-        -- Inactive profile: only historical sessions, no running terminals
-        if session_ok then
-          local ok2, claude_sessions = pcall(session_module._list_sessions, cwd, projects_base)
-          if ok2 and claude_sessions then
-            for _, cs in ipairs(claude_sessions) do
-              local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview
-                or cs.id:sub(1, 8) .. "…"
-              local label = #preview_text > 55 and (preview_text:sub(1, 52) .. "…") or preview_text
-              table.insert(items, {
-                text = "· " .. prefix .. label,
-                kind = "inactive",
-                terminal_id = nil,
-                claude_session_id = cs.id,
-                session_status = "inactive",
-                session_file = session_dir and (session_dir .. cs.id .. ".jsonl") or nil,
-                profile_name = profile_name,
-              })
-            end
+      end
+
+      -- Sessions from disk, annotated with live status when a terminal is running for them.
+      -- Skip entries already represented by an anonymous running session item above.
+      for _, cs in ipairs(claude_sessions) do
+        if not claimed_by_anon[cs.id] then
+          local running = running_by_claude_id[cs.id]
+          local icon, kind, status
+          if running then
+            icon = running.status == "active" and "● "
+              or (running.status == "background" and "○ " or "✕ ")
+            kind = "running"
+            status = running.status
+          else
+            icon = "· "
+            kind = "inactive"
+            status = "inactive"
           end
+          local preview_text = (cs.preview and cs.preview ~= "(no preview)") and cs.preview
+            or cs.id:sub(1, 8) .. "…"
+          local label = #preview_text > 40 and (preview_text:sub(1, 37) .. "…") or preview_text
+          local time_str = format_item_time(cs.timestamp)
+          table.insert(items, {
+            text = icon .. prefix .. time_str .. "  · " .. label,
+            kind = kind,
+            terminal_id = running and running.id or nil,
+            claude_session_id = cs.id,
+            session_status = status,
+            session_file = session_dir and (session_dir .. cs.id .. ".jsonl") or nil,
+            profile_name = profile_name,
+            timestamp = cs.timestamp,
+          })
         end
       end
     end
 
     if has_profiles then
-      -- Active profile first, then remaining profiles sorted by name
-      add_profile_items(current_profile, true)
+      -- Active session's profile first (may differ from default when opened via SessionFor),
+      -- then remaining profiles sorted by name, then nil/default last.
+      local lead_profile = current_profile
+      if active_id then
+        local active_s = find_by_id(active_id)
+        if active_s and active_s.profile then
+          lead_profile = active_s.profile
+        end
+      end
+      add_profile_items(lead_profile)
       for _, p in ipairs(profiles_module.get_all_profiles()) do
-        if p.name ~= current_profile then
-          add_profile_items(p.name, false)
+        if p.name ~= lead_profile then
+          add_profile_items(p.name)
         end
       end
     else
-      add_profile_items(nil, true)
+      add_profile_items(nil)
     end
 
     if #items == 0 then
@@ -1107,12 +1184,53 @@ function M.show_picker(cwd)
       })
     end
 
+    -- Sort: active first, then background by last_attached_at desc, then rest.
+    -- When group_by_profile=false (default): dead/inactive sorted by timestamp desc (pure recency).
+    -- When group_by_profile=true: dead/inactive keep profile-grouped insertion order.
+    local group_by_profile = _cfg.group_by_profile == true
+    local function item_sort_key(item)
+      if item.session_status == "active" then
+        return 0
+      elseif item.session_status == "background" then
+        return 1
+      else
+        return 2
+      end
+    end
+    for i, item in ipairs(items) do
+      item._order = i
+    end
+    table.sort(items, function(a, b)
+      local ka, kb = item_sort_key(a), item_sort_key(b)
+      if ka ~= kb then
+        return ka < kb
+      end
+      if ka == 1 then
+        -- Both background: most recently attached first
+        local sa = a.terminal_id and find_by_id(a.terminal_id)
+        local sb = b.terminal_id and find_by_id(b.terminal_id)
+        local ta = sa and (sa.last_attached_at or sa.created_at) or 0
+        local tb = sb and (sb.last_attached_at or sb.created_at) or 0
+        if ta ~= tb then
+          return ta > tb
+        end
+      elseif ka == 2 and not group_by_profile then
+        -- Both dead/inactive: most recently modified first (pure recency, cross-profile)
+        local ta = a.timestamp or 0
+        local tb = b.timestamp or 0
+        if ta ~= tb then
+          return ta > tb
+        end
+      end
+      return a._order < b._order
+    end)
+
     return items
   end
 
   local picker_title = "Claude Code Sessions"
   if has_profiles and current_profile then
-    picker_title = picker_title .. "  [" .. current_profile .. "]"
+    picker_title = picker_title .. "  [default: " .. current_profile .. "]"
   end
 
   Snacks.picker.pick({
@@ -1159,60 +1277,13 @@ function M.show_picker(cwd)
         return
       end
 
-      -- Cross-profile selection: ask for confirmation before switching
-      local item_profile = item.profile_name
-      local is_cross_profile = has_profiles and item_profile ~= current_profile
-
-      if is_cross_profile then
-        local active_sessions = {}
-        for _, s in ipairs(sessions) do
-          if s.status ~= "dead" then
-            table.insert(active_sessions, s)
-          end
-        end
-        local count = #active_sessions
-        local from_label = current_profile or "default"
-        local to_label = item_profile or "default"
-        local prompt = 'Switch to profile "' .. to_label .. '"?'
-        if count > 0 then
-          local word = count == 1 and "session" or "sessions"
-          prompt = prompt
-            .. "\nThis will stop "
-            .. count
-            .. " active "
-            .. word
-            .. ' in "'
-            .. from_label
-            .. '".'
-        end
-        vim.ui.select({ "Switch", "Cancel" }, { prompt = prompt }, function(_, idx)
-          if idx ~= 1 then
-            return
-          end
-          -- Kill all active sessions from the current profile
-          for _, s in ipairs(vim.deepcopy(active_sessions)) do
-            M.kill_session(s.id)
-          end
-          profiles_module.set_active(item_profile)
-          vim.notify('claudecode: switched to profile "' .. to_label .. '"', vim.log.levels.INFO)
-          vim.schedule(function()
-            if item.kind == "running" and item.terminal_id then
-              M.switch_to(item.terminal_id)
-            elseif item.kind == "inactive" and item.claude_session_id then
-              M.resume_session(item.claude_session_id, cwd)
-            end
-          end)
-        end)
-        return
-      end
-
       if item.kind == "running" and item.terminal_id then
         vim.schedule(function()
           M.switch_to(item.terminal_id)
         end)
       elseif item.kind == "inactive" and item.claude_session_id then
         vim.schedule(function()
-          M.resume_session(item.claude_session_id, cwd)
+          M.resume_session(item.claude_session_id, cwd, item.profile_name)
         end)
       end
     end,

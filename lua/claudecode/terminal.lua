@@ -23,6 +23,8 @@ local defaults = {
   cwd = nil, -- static cwd override
   git_repo_cwd = false, -- resolve to git root when spawning
   cwd_provider = nil, -- function(ctx) -> cwd string
+  -- Session picker
+  group_by_profile = false, -- When true, picker groups sessions by profile instead of sorting by recency
 }
 
 M.defaults = defaults
@@ -481,6 +483,12 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
         end
       else
         vim.notify("claudecode.terminal.setup: Invalid cwd_provider type: " .. tostring(t), vim.log.levels.WARN)
+      end
+    elseif k == "group_by_profile" then
+      if type(v) == "boolean" then
+        defaults.group_by_profile = v
+      else
+        vim.notify("claudecode.terminal.setup: Invalid value for group_by_profile: " .. tostring(v), vim.log.levels.WARN)
       end
     else
       if k ~= "terminal_cmd" then

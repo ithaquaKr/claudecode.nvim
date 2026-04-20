@@ -322,8 +322,22 @@ function M.send_at_mention(file_path, start_line, end_line, context)
     end
     return success, error_msg
   else
-    -- Claude not connected, queue the mention and launch terminal
-    queue_mention(file_path, start_line, end_line)
+    -- Claude not connected, queue the mention and launch terminal.
+    -- Format the path before queuing so the queued mention uses the same relative-path
+    -- format that _broadcast_at_mention produces for the connected path.
+    local queued_path = file_path
+    local queued_start = start_line
+    local queued_end = end_line
+    local fmt_ok, fmt_path, fmt_is_dir = pcall(M._format_path_for_at_mention, file_path)
+    if fmt_ok then
+      queued_path = fmt_path
+      if fmt_is_dir and (queued_start or queued_end) then
+        queued_start = nil
+        queued_end = nil
+      end
+    end
+
+    queue_mention(queued_path, queued_start, queued_end)
 
     local tm_ok, tm = pcall(require, "claudecode.terminal_manager")
     if tm_ok and tm then
@@ -333,7 +347,7 @@ function M.send_at_mention(file_path, start_line, end_line, context)
       terminal.open()
     end
 
-    logger.debug(context, "Queued @ mention and launched Claude Code: " .. file_path)
+    logger.debug(context, "Queued @ mention and launched Claude Code: " .. queued_path)
 
     return true, nil
   end
@@ -495,32 +509,36 @@ function M.start(show_startup_notification)
   M.state.port = tonumber(result)
   M.state.auth_token = auth_token
 
-  local lock_success, lock_result, returned_auth_token = lockfile.create(M.state.port, auth_token)
+  -- Write lockfile to all configured profile lock dirs so Claude CLI sessions under
+  -- any profile can discover this Neovim server.
+  local sync_ok = lockfile.sync_all(M.state.port, auth_token)
 
-  if not lock_success then
-    server.stop()
-    M.state.server = nil
-    M.state.port = nil
-    M.state.auth_token = nil
+  if not sync_ok then
+    -- Fall back to single-dir create so at least one lockfile is written
+    local lock_success, lock_result, returned_auth_token = lockfile.create(M.state.port, auth_token)
 
-    local error_msg = "Failed to create lock file: " .. (lock_result or "unknown error")
-    if lock_result and lock_result:find("auth") then
-      error_msg = error_msg .. " (authentication token issue)"
+    if not lock_success then
+      server.stop()
+      M.state.server = nil
+      M.state.port = nil
+      M.state.auth_token = nil
+
+      local error_msg = "Failed to create lock file: " .. (lock_result or "unknown error")
+      if lock_result and lock_result:find("auth") then
+        error_msg = error_msg .. " (authentication token issue)"
+      end
+      logger.error("init", error_msg)
+      return false, error_msg
     end
-    logger.error("init", error_msg)
-    return false, error_msg
-  end
 
-  -- Verify that the auth token in the lock file matches what we generated
-  if returned_auth_token ~= auth_token then
-    server.stop()
-    M.state.server = nil
-    M.state.port = nil
-    M.state.auth_token = nil
-
-    local error_msg = "Authentication token mismatch between server and lock file"
-    logger.error("init", error_msg)
-    return false, error_msg
+    if returned_auth_token ~= auth_token then
+      server.stop()
+      M.state.server = nil
+      M.state.port = nil
+      M.state.auth_token = nil
+      logger.error("init", "Authentication token mismatch between server and lock file")
+      return false, "Authentication token mismatch between server and lock file"
+    end
   end
 
   if M.state.config.track_selection then
@@ -545,12 +563,7 @@ function M.stop()
   end
 
   local lockfile = require("claudecode.lockfile")
-  local lock_success, lock_error = lockfile.remove(M.state.port)
-
-  if not lock_success then
-    logger.warn("init", "Failed to remove lock file: " .. lock_error)
-    -- Continue with shutdown even if lock file removal fails
-  end
+  lockfile.remove_all(M.state.port)
 
   if M.state.config.track_selection then
     local selection = require("claudecode.selection")
@@ -653,11 +666,11 @@ function M._create_commands()
       table.insert(lines, "  Clients   " .. n .. " connected")
     end
 
-    -- Active profile (when profiles are configured)
+    -- Default profile (when profiles are configured)
     local prof_ok, prof_mod = pcall(require, "claudecode.profiles")
     if prof_ok and prof_mod.has_profiles() then
-      local active = prof_mod.get_active_name() or "—"
-      table.insert(lines, "  Profile   " .. active)
+      local default = prof_mod.get_active_name() or "—"
+      table.insert(lines, "  Default   " .. default)
     end
 
     -- Sessions
@@ -668,12 +681,16 @@ function M._create_commands()
         table.insert(lines, sep)
         table.insert(lines, "  Sessions")
         table.insert(lines, "")
+        local prof_ok2, prof_mod2 = pcall(require, "claudecode.profiles")
+        local show_profile = prof_ok2 and prof_mod2.has_profiles and prof_mod2.has_profiles()
         for _, s in ipairs(all) do
           local icon = s.status == "active" and "●" or (s.status == "background" and "○" or "✕")
-          local lbl = vim.fn.strdisplaywidth(s.label) > W - 8
-            and (vim.fn.strcharpart(s.label, 0, W - 11) .. "…")
+          local tag = (show_profile and s.profile) and ("[" .. s.profile .. "] ") or ""
+          local max_lbl = W - 8 - #tag
+          local lbl = vim.fn.strdisplaywidth(s.label) > max_lbl
+            and (vim.fn.strcharpart(s.label, 0, max_lbl - 3) .. "…")
             or s.label
-          table.insert(lines, "  " .. icon .. "  " .. lbl)
+          table.insert(lines, "  " .. icon .. "  " .. tag .. lbl)
         end
       end
     end
@@ -1250,7 +1267,30 @@ function M._create_commands()
     -- Session management
     vim.api.nvim_create_user_command("ClaudeCodeSessionNew", function()
       tm.new_session()
-    end, { desc = "Open a new Claude Code session (shows session-resume picker)" })
+    end, { desc = "Open a new Claude Code session using the default profile" })
+
+    vim.api.nvim_create_user_command("ClaudeCodeSessionFor", function()
+      local prof_ok, prof_mod = pcall(require, "claudecode.profiles")
+      if not prof_ok or not prof_mod.has_profiles() then
+        vim.notify("claudecode: no profiles configured", vim.log.levels.WARN)
+        return
+      end
+      local all_profiles = prof_mod.get_all_profiles()
+      local options = {}
+      local keys = {}
+      local current = prof_mod.get_active_name()
+      for _, p in ipairs(all_profiles) do
+        local marker = p.name == current and "  (default)" or ""
+        table.insert(options, p.name .. marker)
+        table.insert(keys, p.name)
+      end
+      vim.ui.select(options, { prompt = "Open session for profile:" }, function(_, idx)
+        if not idx then return end
+        vim.schedule(function()
+          tm.new_session_with_profile(keys[idx])
+        end)
+      end)
+    end, { desc = "Open a new Claude Code session, choosing which profile (account) to use" })
 
     vim.api.nvim_create_user_command("ClaudeCodeSessionSwitch", function()
       tm.show_picker()
@@ -1351,17 +1391,9 @@ function M._create_commands()
           end
         end
 
-        -- Move the server lockfile to the new profile's lock directory so that
-        -- Claude CLI sessions launched under the new profile can discover Neovim.
-        -- Remove from the OLD location first (before set_active changes get_lock_dir).
-        local lockfile_ok, lockfile_mod = pcall(require, "claudecode.lockfile")
-        if lockfile_ok and M.state.port and M.state.auth_token then
-          lockfile_mod.remove(M.state.port)
-          profiles_module.set_active(new_profile)
-          lockfile_mod.create(M.state.port, M.state.auth_token)
-        else
-          profiles_module.set_active(new_profile)
-        end
+        -- Lockfiles already exist in all profile lock dirs (written by sync_all at server start).
+        -- No file movement needed — just update the active profile in memory.
+        profiles_module.set_active(new_profile)
 
         local label = new_profile or "(default)"
         vim.notify('claudecode: switched to profile "' .. label .. '"', vim.log.levels.INFO)

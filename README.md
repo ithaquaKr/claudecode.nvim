@@ -31,7 +31,6 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
     { "<leader>a", nil, desc = "AI/Claude Code" },
     { "<leader>ac", "<cmd>ClaudeCode<cr>", desc = "Toggle Claude" },
     { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude" },
-    { "<leader>ar", "<cmd>ClaudeCode --resume<cr>", desc = "Resume Claude" },
     { "<leader>aC", "<cmd>ClaudeCode --continue<cr>", desc = "Continue Claude" },
     { "<leader>am", "<cmd>ClaudeCodeSelectModel<cr>", desc = "Select Claude model" },
     { "<leader>ab", "<cmd>ClaudeCodeAdd %<cr>", desc = "Add current buffer" },
@@ -46,6 +45,8 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
     { "<leader>an", "<cmd>ClaudeCodeSessionNew<cr>", desc = "New Claude session" },
     { "<leader>a<Tab>", "<cmd>ClaudeCodeSessionSwitch<cr>", desc = "Switch Claude session" },
     { "<leader>ak", "<cmd>ClaudeCodeSessionKill<cr>", desc = "Kill active Claude session" },
+    -- Profile management
+    { "<leader>ap", "<cmd>ClaudeCodeProfile<cr>", desc = "Switch Claude profile" },
     -- Diff management
     { "<leader>aa", "<cmd>ClaudeCodeDiffAccept<cr>", desc = "Accept diff" },
     { "<leader>ad", "<cmd>ClaudeCodeDiffDeny<cr>", desc = "Deny diff" },
@@ -197,6 +198,9 @@ Configure the plugin with the detected path:
 
 - `:ClaudeCode` - Toggle the Claude Code terminal window
 - `:ClaudeCodeFocus` - Smart focus/toggle Claude terminal
+- `:ClaudeCodeOpen` - Always open a new Claude Code session (accepts optional args)
+- `:ClaudeCodeClose` - Hide the active Claude Code terminal window (process keeps running)
+- `:ClaudeCodeStatus` - Toggle the status popup (server state, sessions, account usage)
 - `:ClaudeCodeSelectModel` - Select Claude model and open terminal with optional arguments
 - `:ClaudeCodeSend` - Send current visual selection to Claude
 - `:ClaudeCodeAdd <file-path> [start-line] [end-line]` - Add specific file to Claude context with optional line range
@@ -205,9 +209,14 @@ Configure the plugin with the detected path:
 
 ### Multi-Session Commands
 
-- `:ClaudeCodeSessionNew` - Open a new Claude session (shows session-resume picker)
+- `:ClaudeCodeSessionNew` - Open a new Claude session using the default profile
+- `:ClaudeCodeSessionFor` - Pick a profile and open a new session bound to that account
 - `:ClaudeCodeSessionSwitch` - Show session quick-switcher (Snacks picker); lists all running and historical sessions for the current project
 - `:ClaudeCodeSessionKill` - Kill the currently active managed session
+
+### Profile Commands
+
+- `:ClaudeCodeProfile` - Switch the default profile (account) used for new sessions
 
 ## Working with Diffs
 
@@ -283,6 +292,9 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
         -- 3. Function returning command: function(cmd, env) return "alacritty -e " .. cmd end
         external_terminal_cmd = nil,
       },
+
+      -- Session picker
+      group_by_profile = false, -- When true, picker groups sessions by profile instead of sorting by recency
     },
 
     -- Diff Integration
@@ -303,6 +315,43 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
   },
 }
 ```
+
+### Multi-Account Profiles
+
+Run multiple Claude accounts (e.g. personal and work) simultaneously within a single Neovim instance. Each terminal session is independently bound to an account.
+
+```lua
+require("claudecode").setup({
+  profiles = {
+    personal = {
+      claude_config_dir = "~/.claude",
+      account_email = "you@gmail.com",   -- required on macOS for Keychain matching
+    },
+    work = {
+      claude_config_dir = "~/.claude-work",
+      account_email = "you@company.com",
+      -- env = { ANTHROPIC_API_KEY = "sk-..." }, -- optional extra env vars
+    },
+  },
+  default_profile = "personal",  -- used at startup; nil = system default (~/.claude)
+})
+```
+
+With profiles configured:
+
+- `:ClaudeCodeSessionNew` / `:ClaudeCode` opens a session using the **default profile**
+- `:ClaudeCodeSessionFor` shows a picker so you can open a session for any account without changing the default
+- `:ClaudeCodeProfile` changes which profile is used for future new sessions
+- `:ClaudeCodeStatus` shows per-account usage bars and plan info for all profiles
+
+Sessions from different profiles can coexist in the same editor:
+
+```
+● [personal] New Session 1   ← uses ~/.claude
+○ [work]     client-project  ← uses ~/.claude-work
+```
+
+See [docs/per-session-profiles.md](./docs/per-session-profiles.md) for architecture details.
 
 ### Working Directory Control
 
@@ -783,7 +832,7 @@ opts = {
 
 ## Troubleshooting
 
-- **Claude not connecting?** Check `:ClaudeCodeStatus` and verify lock file exists in `~/.claude/ide/` (or `$CLAUDE_CONFIG_DIR/ide/` if `CLAUDE_CONFIG_DIR` is set)
+- **Claude not connecting?** Run `:ClaudeCodeStatus` (floating popup) and verify lock file exists in `~/.claude/ide/` (or `$CLAUDE_CONFIG_DIR/ide/` if `CLAUDE_CONFIG_DIR` is set)
 - **Need debug logs?** Set `log_level = "debug"` in opts
 - **Terminal issues?** Try `provider = "native"` if using snacks.nvim
 - **Local installation not working?** If you used `claude migrate-installer`, set `terminal_cmd = "~/.claude/local/claude"` in your config. Check `which claude` vs `ls ~/.claude/local/claude` to verify your installation type.

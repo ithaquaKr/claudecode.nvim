@@ -616,15 +616,15 @@ function M.render_all_profiles_lines(profile_results, W)
   local SEP = "  " .. string.rep("─", W - 4)
   local all_lines = { SEP, "  Profiles" }
 
-  -- Determine active profile for bullet marking
-  local active_name
+  -- Mark the default profile with ● so it's easy to spot
+  local default_name
   local prof_ok, prof_mod = pcall(require, "claudecode.profiles")
-  if prof_ok then active_name = prof_mod.get_active_name() end
+  if prof_ok then default_name = prof_mod.get_active_name() end
 
   for _, pr in ipairs(profile_results) do
     -- Blank line before each profile entry
     table.insert(all_lines, "")
-    local marker = (pr.name ~= nil and pr.name == active_name) and " ●" or ""
+    local marker = (pr.name ~= nil and pr.name == default_name) and " ●" or ""
     table.insert(all_lines, "  " .. (pr.name or "—") .. marker)
 
     if pr.is_api_key then

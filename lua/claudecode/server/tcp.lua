@@ -210,10 +210,11 @@ function M.send_to_client(server, client_id, message, callback)
     if callback then
       callback("Client not found: " .. client_id)
     end
-    return
+    return false
   end
 
   client_manager.send_message(client, message, callback)
+  return true
 end
 
 ---Broadcast a message to all connected clients

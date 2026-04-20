@@ -408,7 +408,7 @@ function M.send_to_active(method, params)
   local json_message = vim.json.encode(message)
 
   if M.state.active_client_id then
-    return tcp_server.send_to_client(M.state.server, M.state.active_client_id, json_message) ~= nil
+    return tcp_server.send_to_client(M.state.server, M.state.active_client_id, json_message) == true
   end
 
   -- No active client tracked — fall back to broadcast (single-session or legacy path)

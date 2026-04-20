@@ -37,6 +37,14 @@ describe("claudecode.init", function()
     remove = function()
       return true
     end,
+    sync_all = function()
+      return true
+    end,
+    ---@type SpyableFunction
+    remove_all = function() end,
+    get_all_lock_dirs = function()
+      return { "/mock/ide" }
+    end,
     generate_auth_token = function()
       return "mock-auth-token-12345"
     end,
@@ -203,6 +211,8 @@ describe("claudecode.init", function()
 
     mock_server.stop = SpyObject.new(mock_server.stop)
     mock_lockfile.remove = SpyObject.new(mock_lockfile.remove)
+    mock_lockfile.remove_all = SpyObject.new(mock_lockfile.remove_all)
+    mock_lockfile.sync_all = SpyObject.new(mock_lockfile.sync_all)
 
     _G.require = function(mod)
       if mod == "claudecode.server.init" then
@@ -260,14 +270,14 @@ describe("claudecode.init", function()
       assert(callback_fn, "Callback for VimLeavePre with ClaudeCodeShutdown group not found")
 
       mock_server.stop.calls = {}
-      mock_lockfile.remove.calls = {}
+      mock_lockfile.remove_all.calls = {}
 
       if callback_fn then
         callback_fn()
       end
 
       assert(#mock_server.stop.calls > 0, "Server stop was not called")
-      assert(#mock_lockfile.remove.calls > 0, "Lockfile remove was not called")
+      assert(#mock_lockfile.remove_all.calls > 0, "Lockfile remove_all was not called")
     end)
 
     it("should do nothing if the server is not running", function()
@@ -278,14 +288,14 @@ describe("claudecode.init", function()
       local callback_fn = opts.callback
 
       mock_server.stop.calls = {}
-      mock_lockfile.remove.calls = {}
+      mock_lockfile.remove_all.calls = {}
 
       if callback_fn then
         callback_fn()
       end
 
       assert(#mock_server.stop.calls == 0, "Server stop was called unexpectedly")
-      assert(#mock_lockfile.remove.calls == 0, "Lockfile remove was called unexpectedly")
+      assert(#mock_lockfile.remove_all.calls == 0, "Lockfile remove_all was called unexpectedly")
     end)
   end)
 
