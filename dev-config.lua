@@ -12,7 +12,7 @@ return {
 
     -- Core Claude commands
     { "<leader>ac", "<cmd>ClaudeCode<cr>", desc = "Toggle Claude" },
-    { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude", icon = "󱁐" },
+    { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude" },
     { "<leader>am", "<cmd>ClaudeCodeSelectModel<cr>", desc = "Select Claude model" },
 
     -- Context sending
@@ -34,7 +34,8 @@ return {
     -- Development helpers
     { "<leader>ao", "<cmd>ClaudeCodeOpen<cr>", desc = "Open Claude" },
     { "<leader>aq", "<cmd>ClaudeCodeClose<cr>", desc = "Close Claude" },
-    { "<leader>ai", "<cmd>ClaudeCodeStatus<cr>", desc = "Claude Status", icon = "" },
+    { "<leader>ai", "<cmd>ClaudeCodeStatus<cr>", desc = "Claude Status" },
+    { "<leader>aU", "<cmd>ClaudeCodeStats<cr>", desc = "Claude Usage Stats" },
     { "<leader>aS", "<cmd>ClaudeCodeStart<cr>", desc = "Start Claude Server" },
     { "<leader>aQ", "<cmd>ClaudeCodeStop<cr>", desc = "Stop Claude Server" },
 

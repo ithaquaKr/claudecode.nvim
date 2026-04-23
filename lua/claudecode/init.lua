@@ -796,6 +796,17 @@ function M._create_commands()
     desc = "Toggle Claude Code status popup (with account usage)",
   })
 
+  vim.api.nvim_create_user_command("ClaudeCodeStats", function()
+    local ok, popup = pcall(require, "claudecode.stats_popup")
+    if not ok then
+      vim.notify("[ClaudeCodeStats] Failed to load stats module: " .. tostring(popup), vim.log.levels.ERROR)
+      return
+    end
+    popup.toggle()
+  end, {
+    desc = "Toggle Claude Code local usage stats popup",
+  })
+
   ---@param file_paths table List of file paths to add
   ---@param options table|nil Optional settings: { delay?: number, show_summary?: boolean, context?: string }
   ---@return number success_count Number of successfully added files
